@@ -68,8 +68,9 @@ pub(crate) fn unsupported_file_type_error(path: &Path) -> CryptoError {
 /// type is then checked on the open handle, leaving no window between
 /// check and use; `O_NONBLOCK` has no effect on regular-file reads.
 /// Directories pass through deliberately — each caller keeps its
-/// established directory handling (probe short-circuits them, decrypt
-/// surfaces the platform's directory-read error).
+/// established directory handling (the probe short-circuits them,
+/// `Decryptor::open` refuses them as directories, and decrypt surfaces the
+/// platform's directory-read error).
 ///
 /// A missing path maps to the typed [`CryptoError::InputPath`] via
 /// [`map_user_path_io_error`], so every caller reports a missing input

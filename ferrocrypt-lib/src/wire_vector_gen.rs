@@ -137,6 +137,10 @@ fn ungrammatical_type_name() -> String {
     UNSUPPORTED_KEY_TYPE.to_uppercase()
 }
 
+/// A byte the §3.3 grammar refuses anywhere in a type name. Written over one
+/// byte of a name, it breaks the grammar without changing any length.
+const UNGRAMMATICAL_TYPE_NAME_BYTE: u8 = 0x00;
+
 /// The byte that fills every region whose content does not matter to its case.
 const FILLER: u8 = 0xAA;
 
@@ -158,6 +162,12 @@ const RESERVED_VERSION: u8 = 0x00;
 /// flags, the FCA flags, and the `private.key` key flags reserve every bit, so a
 /// reader refuses it in any of them.
 const RESERVED_FLAG_BIT: u16 = 0x0001;
+
+/// The highest `recipient_flags` bit `FORMAT.md` §3.4 reserves. Bit 0 is the
+/// critical flag, so the recipient cases set this reserved bit instead. It
+/// comes from §3.4 rather than from the reader's mask, so a mistake in the
+/// mask cannot carry over into the corpus that should catch it.
+const RESERVED_RECIPIENT_FLAG_BIT: u16 = 1 << 15;
 
 /// Flips every bit of the first byte of an artifact, so its magic no longer
 /// matches.
@@ -2112,17 +2122,27 @@ fn mutate_fcr(
     diagnostic_class: &str,
     mutate: impl FnOnce(&mut Vec<u8>),
 ) {
+    let row = mutated_fcr_row(corpus, base, case_id, credential_id, mutate);
+    corpus.push_case(row.reject(condition_id, diagnostic_class));
+}
+
+/// Writes a mutated copy of `base` and returns its case row, for a case whose
+/// row needs more than [`mutate_fcr`] sets before it is committed.
+fn mutated_fcr_row(
+    corpus: &mut Corpus,
+    base: &MutationBase,
+    case_id: &str,
+    credential_id: &str,
+    mutate: impl FnOnce(&mut Vec<u8>),
+) -> CaseRow {
     let mut bytes = base.bytes.clone();
     mutate(&mut bytes);
     assert_ne!(bytes, base.bytes, "{case_id}: mutation changed nothing");
     let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &bytes);
-    corpus.push_case(
-        CaseRow::fcr(case_id, &artifact_ref)
-            .origin(&base.origin_id)
-            .mutation_of(&base.case_id)
-            .credential(credential_id)
-            .reject(condition_id, diagnostic_class),
-    );
+    CaseRow::fcr(case_id, &artifact_ref)
+        .origin(&base.origin_id)
+        .mutation_of(&base.case_id)
+        .credential(credential_id)
 }
 
 /// Commits a fabricated `.fcr`-shaped artifact that carries no genuine payload
@@ -2163,24 +2183,26 @@ fn payload_offset(bytes: &[u8]) -> usize {
     crate::format::PREFIX_SIZE + header_len + crate::format::HEADER_MAC_SIZE
 }
 
-/// `fcr` with `extra` zero bytes appended to its recipient-entries region.
-/// `recipient_entries_len` and `header_len` grow to match, so the §3.2
-/// lengths still sum, and the header MAC is recomputed under `file_key`, so
-/// the rule that the entries fill their region is the only one the result
-/// breaks.
+/// Inserts `extra` zero bytes after the last recipient entry and raises
+/// `recipient_entries_len` and `header_len` to match, so the §3.2 lengths
+/// still sum while the entries no longer fill their region. The header MAC is
+/// left as it was.
+fn pad_recipient_region(b: &mut Vec<u8>, extra: usize) {
+    let entries_end = OFF_FIRST_ENTRY + be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN) as usize;
+    b.splice(entries_end..entries_end, std::iter::repeat_n(0u8, extra));
+    let delta = i32::try_from(extra).expect("the padding fits a length field");
+    shift_length_fields(b, &REGION_LENGTH_FIELDS, delta);
+}
+
+/// `fcr` padded by [`pad_recipient_region`], with the header MAC recomputed
+/// under `file_key`, so the rule that the entries fill their region is the
+/// only one the result breaks.
 fn with_recipient_region_padding(fcr: &[u8], file_key: &FileKey, extra: usize) -> Vec<u8> {
     use crate::format::{HEADER_MAC_SIZE, PREFIX_SIZE};
 
-    let header_len = be_u32_at(fcr, OFF_HEADER_LEN);
-    let entries_len = be_u32_at(fcr, OFF_RECIPIENT_ENTRIES_LEN);
-    let extra_len = u32::try_from(extra).expect("the padding fits a length field");
-    let header_end = PREFIX_SIZE + header_len as usize;
-
-    let mut out = fcr[..header_end].to_vec();
-    let entries_end = OFF_FIRST_ENTRY + entries_len as usize;
-    out.splice(entries_end..entries_end, std::iter::repeat_n(0u8, extra));
-    write_u32_be(&mut out, OFF_HEADER_LEN, header_len + extra_len);
-    write_u32_be(&mut out, OFF_RECIPIENT_ENTRIES_LEN, entries_len + extra_len);
+    let mut out = fcr.to_vec();
+    pad_recipient_region(&mut out, extra);
+    let mac_at = payload_offset(&out) - HEADER_MAC_SIZE;
 
     let stream_nonce: [u8; STREAM_NONCE_SIZE] = out
         [OFF_STREAM_NONCE..OFF_STREAM_NONCE + STREAM_NONCE_SIZE]
@@ -2189,10 +2211,9 @@ fn with_recipient_region_padding(fcr: &[u8], file_key: &FileKey, extra: usize) -
     let DerivedSubkeys { header_key, .. } =
         derive_subkeys(file_key, &stream_nonce).expect("derive subkeys");
     let prefix: [u8; PREFIX_SIZE] = out[..PREFIX_SIZE].try_into().expect("prefix");
-    let mac = crate::format::compute_header_mac(&prefix, &out[PREFIX_SIZE..], &header_key)
+    let mac = crate::format::compute_header_mac(&prefix, &out[PREFIX_SIZE..mac_at], &header_key)
         .expect("header MAC");
-    out.extend_from_slice(&mac);
-    out.extend_from_slice(&fcr[header_end + HEADER_MAC_SIZE..]);
+    out[mac_at..mac_at + HEADER_MAC_SIZE].copy_from_slice(&mac);
     out
 }
 
@@ -2306,15 +2327,15 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 
     // A newer outer-container version is capability-relative: an
     // implementation that adds support for it stops rejecting these bytes.
-    let mut newer = base.bytes.clone();
-    newer[OFF_OUTER_VERSION] = NEWER_VERSION;
-    let artifact_ref = corpus.write_ref("artifacts/fcr/prefix-newer-outer-version.fcr", &newer);
+    let row = mutated_fcr_row(
+        corpus,
+        base,
+        "prefix-newer-outer-version",
+        "passphrase-main",
+        |b| b[OFF_OUTER_VERSION] = NEWER_VERSION,
+    );
     corpus.push_case(
-        CaseRow::fcr("prefix-newer-outer-version", &artifact_ref)
-            .origin(&base.origin_id)
-            .mutation_of(&base.case_id)
-            .credential("passphrase-main")
-            .capability(&newer_version_capability("outer_version"))
+        row.capability(&newer_version_capability("outer_version"))
             .reject("outer_version_unsupported", "unsupported_outer_version"),
     );
 
@@ -2361,6 +2382,141 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "header_len_zero_with_complete_mac_bytes",
         "malformed_header",
         &zero_header_with_mac,
+    );
+
+    write_prefix_check_order_cases(corpus, base);
+}
+
+/// The `.fcr` check order of `FORMAT.md` §3.1 to §3.3, and of §3.7 before any
+/// recipient is tried. A reader must make every two of these checks that report
+/// different classes, and that one file can break together, in the stated
+/// order. The header-MAC work cap is left out, because §3.2 only recommends
+/// where a reader applies it.
+///
+/// A rejected case shows that, of the checks it breaks, the reader makes one of
+/// the expected class first. A case that breaks two checks of different
+/// classes, and none before them, therefore fixes their order directly: a
+/// reader that makes the two the other way round reports the later one's class.
+/// A case that also breaks a later check of the expected class fixes the order
+/// only together with the cases that put that check after the others. Two such
+/// facts, one check before a second and the second before a third, fix the
+/// first before the third. The entry checks run as one block, so a check
+/// outside them that comes before one of them comes before them all, and one
+/// that comes after one comes after them all. The cases here and in
+/// [`write_header_check_order_cases`] and [`write_recipient_check_order_cases`]
+/// supply every pair the other cases leave open, alone or through such a chain.
+/// The version byte, whose outcomes differ in class, counts as one check per
+/// class. Only a pair with a check that a capability changes rests on a
+/// capability-relative case, so a reader that declares a capability loses only
+/// such pairs. A recipient type the reader implements changes two checks:
+/// whether an entry of that type is unknown and critical, and whether the file
+/// holds a supported recipient.
+fn write_prefix_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
+    use crate::format::{HEADER_LEN_MAX, KIND_PRIVATE_KEY, PREFIX_SIZE};
+
+    let mut short_with_bad_magic = base.bytes[..PREFIX_SIZE - 1].to_vec();
+    break_magic(&mut short_with_bad_magic);
+    fabricate_fcr(
+        corpus,
+        "prefix-order-length-before-magic",
+        "passphrase-main",
+        "input_shorter_than_prefix_and_magic_mismatch",
+        "truncated",
+        &short_with_bad_magic,
+    );
+
+    let cases: [ByteMutationCase; 6] = [
+        (
+            "prefix-order-magic-before-kind",
+            Box::new(|b: &mut Vec<u8>| {
+                break_magic(b);
+                b[OFF_PREFIX_KIND] = KIND_PRIVATE_KEY;
+            }),
+            "prefix_magic_mismatch_and_kind_not_encrypted",
+            "bad_magic",
+        ),
+        (
+            "prefix-order-kind-before-version-zero",
+            Box::new(|b: &mut Vec<u8>| {
+                b[OFF_PREFIX_KIND] = KIND_PRIVATE_KEY;
+                b[OFF_OUTER_VERSION] = RESERVED_VERSION;
+            }),
+            "prefix_kind_not_encrypted_and_outer_version_reserved_zero",
+            "wrong_kind",
+        ),
+        (
+            "prefix-order-kind-before-newer-version",
+            Box::new(|b: &mut Vec<u8>| {
+                b[OFF_PREFIX_KIND] = KIND_PRIVATE_KEY;
+                b[OFF_OUTER_VERSION] = NEWER_VERSION;
+            }),
+            "prefix_kind_not_encrypted_with_newer_outer_version",
+            "wrong_kind",
+        ),
+        (
+            "prefix-order-kind-before-flags",
+            Box::new(|b: &mut Vec<u8>| {
+                b[OFF_PREFIX_KIND] = KIND_PRIVATE_KEY;
+                write_u16_be(b, OFF_PREFIX_FLAGS, RESERVED_FLAG_BIT);
+            }),
+            "prefix_kind_not_encrypted_and_prefix_flags_nonzero",
+            "wrong_kind",
+        ),
+        // A `header_len` past the maximum is also over the local cap, leaves
+        // the declared header cut short, and no longer equals the sum of the
+        // section lengths. The last of those is `malformed_header` too, so
+        // these two fix their order together with
+        // `prefix-header-len-over-structural-max`, which puts the maximum
+        // before it.
+        (
+            "prefix-order-version-zero-before-header-len",
+            Box::new(|b: &mut Vec<u8>| {
+                b[OFF_OUTER_VERSION] = RESERVED_VERSION;
+                write_u32_be(b, OFF_HEADER_LEN, HEADER_LEN_MAX + 1);
+            }),
+            "outer_version_reserved_zero_and_header_len_above_structural_maximum",
+            "malformed_header",
+        ),
+        (
+            "prefix-order-flags-before-header-len",
+            Box::new(|b: &mut Vec<u8>| {
+                write_u16_be(b, OFF_PREFIX_FLAGS, RESERVED_FLAG_BIT);
+                write_u32_be(b, OFF_HEADER_LEN, HEADER_LEN_MAX + 1);
+            }),
+            "prefix_flags_nonzero_and_header_len_above_structural_maximum",
+            "malformed_header",
+        ),
+    ];
+    for (case_id, mutate, condition_id, class) in cases {
+        mutate_fcr(
+            corpus,
+            base,
+            case_id,
+            "passphrase-main",
+            condition_id,
+            class,
+            mutate,
+        );
+    }
+
+    // A reader that supports the newer version may lay out the rest of the
+    // prefix differently, so this pair is capability-relative.
+    let row = mutated_fcr_row(
+        corpus,
+        base,
+        "prefix-order-newer-version-before-flags",
+        "passphrase-main",
+        |b| {
+            b[OFF_OUTER_VERSION] = NEWER_VERSION;
+            write_u16_be(b, OFF_PREFIX_FLAGS, RESERVED_FLAG_BIT);
+        },
+    );
+    corpus.push_case(
+        row.capability(&newer_version_capability("outer_version"))
+            .reject(
+                "outer_version_unsupported_and_prefix_flags_nonzero",
+                "unsupported_outer_version",
+            ),
     );
 }
 
@@ -2527,19 +2683,52 @@ fn declare_ext_region_above_max(b: &mut Vec<u8>) {
     b.splice(insert_at..insert_at, std::iter::repeat_n(0u8, ext as usize));
 }
 
+/// The length fields that enclose the first recipient entry's body, innermost
+/// first: `body_len`, `recipient_entries_len`, then `header_len`.
+const FIRST_BODY_LENGTH_FIELDS: [usize; 3] = [
+    OFF_FIRST_ENTRY_BODY_LEN,
+    OFF_RECIPIENT_ENTRIES_LEN,
+    OFF_HEADER_LEN,
+];
+
+/// The length fields that enclose the recipient-entries region:
+/// `recipient_entries_len` and `header_len`.
+const REGION_LENGTH_FIELDS: [usize; 2] = [OFF_RECIPIENT_ENTRIES_LEN, OFF_HEADER_LEN];
+
+/// Adds `delta` to each big-endian `u32` length field at the offsets `fields`.
+fn shift_length_fields(b: &mut [u8], fields: &[usize], delta: i32) {
+    for &field in fields {
+        let declared = be_u32_at(b, field);
+        let shifted = declared
+            .checked_add_signed(delta)
+            .expect("the length stays within its field");
+        write_u32_be(b, field, shifted);
+    }
+}
+
 /// Removes the byte at `at` from the first recipient entry's body and lowers
 /// `body_len`, `recipient_entries_len`, and `header_len` by one, so the body
 /// is one byte shorter and every length that encloses it still matches.
 fn remove_first_entry_body_byte(b: &mut Vec<u8>, at: usize) {
-    for field in [
-        OFF_FIRST_ENTRY_BODY_LEN,
-        OFF_RECIPIENT_ENTRIES_LEN,
-        OFF_HEADER_LEN,
-    ] {
-        let declared = be_u32_at(b, field);
-        write_u32_be(b, field, declared - 1);
-    }
+    shift_length_fields(b, &FIRST_BODY_LENGTH_FIELDS, -1);
     b.remove(at);
+}
+
+/// Offset just past the first recipient entry, by its own declared lengths.
+fn first_entry_end(b: &[u8]) -> usize {
+    OFF_FIRST_ENTRY_TYPE_NAME
+        + usize::from(be_u16_at(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN))
+        + be_u32_at(b, OFF_FIRST_ENTRY_BODY_LEN) as usize
+}
+
+/// Appends `extra` filler bytes to the first recipient entry's body and raises
+/// `body_len`, `recipient_entries_len`, and `header_len` to match, so every
+/// length that encloses the body still holds.
+fn grow_first_entry_body(b: &mut Vec<u8>, extra: usize) {
+    let body_end = first_entry_end(b);
+    b.splice(body_end..body_end, std::iter::repeat_n(FILLER, extra));
+    let delta = i32::try_from(extra).expect("the growth fits a length field");
+    shift_length_fields(b, &FIRST_BODY_LENGTH_FIELDS, delta);
 }
 
 /// Raises the declared `recipient_entries_len` by one and nothing else, so
@@ -2550,14 +2739,13 @@ fn break_section_lengths(b: &mut [u8]) {
     write_u32_be(b, OFF_RECIPIENT_ENTRIES_LEN, entries + 1);
 }
 
-/// The §3.2 check order, one case per pair of adjacent checks whose classes
-/// differ. Each file breaks exactly those two rules, so it reports the class
-/// of the earlier one only in a reader that checks in the stated order.
-/// Together the pairs fix the whole sequence: header flags, the recipient
-/// count, the extension length, the section-length sum, the local
-/// recipient-count cap, then the entries. Header flags and the length sum
-/// share their class, so their relative order needs no case.
+/// The `FORMAT.md` §3.2 check order, by the method of
+/// [`write_prefix_check_order_cases`]. A header too short for `header_fixed`,
+/// nonzero header flags, and unequal section lengths share their class, so no
+/// case orders them among themselves.
 fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
+    use crate::format::{HEADER_MAC_SIZE, PREFIX_SIZE};
+
     let over_count_cap = crate::HeaderReadLimits::RECIPIENT_COUNT_DEFAULT + 1;
 
     mutate_fcr(
@@ -2616,6 +2804,38 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
             write_u16_be(b, OFF_RECIPIENT_COUNT, over_count_cap);
             write_u16_be(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN, 0);
         },
+    );
+
+    // These two keep none of the base's ciphertext, so they are fabricated, as
+    // the framing cases are.
+    let mut flags_then_cut = base.bytes.clone();
+    write_u16_be(&mut flags_then_cut, OFF_HEADER_FLAGS, RESERVED_FLAG_BIT);
+    flags_then_cut.truncate(payload_offset(&flags_then_cut) - 1);
+    fabricate_fcr(
+        corpus,
+        "header-order-truncation-before-flags",
+        "passphrase-main",
+        "header_mac_ends_early_and_header_flags_nonzero",
+        "truncated",
+        &flags_then_cut,
+    );
+
+    // A header that ends right after `recipient_count`: it holds a count of
+    // zero but not the length fields, whose unequal sum would be
+    // `malformed_header` as well.
+    let mut undersized = base.bytes[..OFF_RECIPIENT_ENTRIES_LEN].to_vec();
+    let undersized_len =
+        u32::try_from(OFF_RECIPIENT_ENTRIES_LEN - PREFIX_SIZE).expect("the length fits its field");
+    write_u32_be(&mut undersized, OFF_HEADER_LEN, undersized_len);
+    write_u16_be(&mut undersized, OFF_RECIPIENT_COUNT, 0);
+    undersized.extend_from_slice(&[0u8; HEADER_MAC_SIZE]);
+    fabricate_fcr(
+        corpus,
+        "header-order-undersized-before-count",
+        "passphrase-main",
+        "header_len_below_fixed_size_and_recipient_count_zero",
+        "malformed_header",
+        &undersized,
     );
 }
 
@@ -2704,25 +2924,49 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
 
 /// Builds a rejected `.fcr` from crafted recipient entries with a genuine
 /// payload and a valid header MAC, so the case isolates the recipient rule
-/// rather than tripping authentication first.
+/// rather than tripping authentication first. Returns it as a base later
+/// cases can mutate.
 #[allow(clippy::too_many_arguments)]
 fn crafted_reject_case(
     corpus: &mut Corpus,
     sources: &Path,
     case_id: &str,
-    origin_id: &str,
     credential_id: &str,
+    capability_id: Option<&str>,
     condition_id: &str,
     diagnostic_class: &str,
     file_key: &FileKey,
     entries: &[RecipientEntry],
     ext_bytes: &[u8],
-) {
+) -> MutationBase {
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let built = build_fcr_with_entries(&source, file_key, entries, ext_bytes);
+    commit_crafted_reject(
+        corpus,
+        case_id,
+        credential_id,
+        capability_id,
+        condition_id,
+        diagnostic_class,
+        built,
+    )
+}
+
+/// Commits `built` as a rejected case that anchors its own payload origin,
+/// `origin-{case_id}`, and returns it as a base later cases can mutate.
+fn commit_crafted_reject(
+    corpus: &mut Corpus,
+    case_id: &str,
+    credential_id: &str,
+    capability_id: Option<&str>,
+    condition_id: &str,
+    diagnostic_class: &str,
+    built: BuiltFcr,
+) -> MutationBase {
     let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
+    let origin_id = format!("origin-{case_id}");
     corpus.push_origin(OriginRow {
-        origin_id: origin_id.to_string(),
+        origin_id: origin_id.clone(),
         origin_kind: "fcr_payload",
         anchor_case_id: case_id.to_string(),
         payload_key_ref: "-".to_string(),
@@ -2731,11 +2975,17 @@ fn crafted_reject_case(
     });
     corpus.push_case(
         CaseRow::fcr(case_id, &artifact_ref)
-            .origin(origin_id)
+            .origin(&origin_id)
             .fabricated()
             .credential(credential_id)
+            .capability_if_any(capability_id)
             .reject(condition_id, diagnostic_class),
     );
+    MutationBase {
+        case_id: case_id.to_string(),
+        origin_id,
+        bytes: built.bytes,
+    }
 }
 
 fn build_fcr_with_entries(
@@ -2745,6 +2995,22 @@ fn build_fcr_with_entries(
     ext_bytes: &[u8],
 ) -> BuiltFcr {
     build_fcr(source, file_key, entries, ext_bytes).expect("build crafted fcr")
+}
+
+/// Drops the last byte of a recipient's body, so it is one byte short.
+fn shorten_body(entry: &mut RecipientEntry) {
+    entry.body.pop();
+}
+
+/// Zeroes an `x25519` body's ephemeral public key, which the §4.2 preflight
+/// refuses.
+fn zero_x25519_ephemeral(entry: &mut RecipientEntry) {
+    entry.body[..x25519::PUBLIC_KEY_SIZE].fill(0);
+}
+
+/// Sets the critical flag, which §3.4 forbids on a native entry.
+fn set_critical_flag(entry: &mut RecipientEntry) {
+    entry.recipient_flags = crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
 }
 
 /// A grammar-valid recipient entry for a type this build does not implement.
@@ -2801,24 +3067,17 @@ fn write_recipient_framing_cases(
     let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], b"");
     let padded = with_recipient_region_padding(&built.bytes, &file_key, 1);
     drop(scope);
-    let artifact_ref = corpus.write_ref("artifacts/fcr/entry-region-trailing-bytes.fcr", &padded);
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-entry-region-trailing-bytes".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "entry-region-trailing-bytes".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: built.payload_key_sha3_256,
-        stream_nonce_hex: built.stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("entry-region-trailing-bytes", &artifact_ref)
-            .origin("origin-entry-region-trailing-bytes")
-            .fabricated()
-            .credential("passphrase-main")
-            .reject(
-                "recipient_entries_do_not_fill_region",
-                "malformed_recipient_entry",
-            ),
+    commit_crafted_reject(
+        corpus,
+        "entry-region-trailing-bytes",
+        "passphrase-main",
+        None,
+        "recipient_entries_do_not_fill_region",
+        "malformed_recipient_entry",
+        BuiltFcr {
+            bytes: padded,
+            ..built
+        },
     );
 
     mutate_fcr(
@@ -2828,7 +3087,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_reserved_flag_bit_nonzero",
         "recipient_flags_reserved",
-        |b| write_u16_be(b, OFF_FIRST_ENTRY_FLAGS, 1 << 15),
+        |b| write_u16_be(b, OFF_FIRST_ENTRY_FLAGS, RESERVED_RECIPIENT_FLAG_BIT),
     );
     mutate_fcr(
         corpus,
@@ -2837,7 +3096,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_type_name_violates_grammar",
         "malformed_type_name",
-        |b| b[OFF_FIRST_ENTRY_TYPE_NAME] = 0x00,
+        |b| b[OFF_FIRST_ENTRY_TYPE_NAME] = UNGRAMMATICAL_TYPE_NAME_BYTE,
     );
 
     // A single unknown non-critical recipient: nothing to try.
@@ -2846,8 +3105,8 @@ fn write_recipient_framing_cases(
         corpus,
         sources,
         "recipient-none-supported",
-        "origin-recipient-none-supported",
         "passphrase-main",
+        None,
         "no_recipient_of_a_supported_type",
         "no_supported_recipient",
         &FileKey::generate().expect("file key"),
@@ -2884,23 +3143,14 @@ fn write_recipient_framing_cases(
         let capability = format!("recipient_type:{}", critical.type_name);
         let entries = [critical, x25519_entry(&keys.public_a, &file_key)];
         let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
-        let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
-        let origin_id = format!("origin-{case_id}");
-        corpus.push_origin(OriginRow {
-            origin_id: origin_id.clone(),
-            origin_kind: "fcr_payload",
-            anchor_case_id: case_id.to_string(),
-            payload_key_ref: "-".to_string(),
-            payload_key_sha3_256: built.payload_key_sha3_256,
-            stream_nonce_hex: built.stream_nonce_hex,
-        });
-        corpus.push_case(
-            CaseRow::fcr(case_id, &artifact_ref)
-                .origin(&origin_id)
-                .fabricated()
-                .credential("private-key-a")
-                .capability(&capability)
-                .reject(condition_id, "unknown_critical_recipient"),
+        commit_crafted_reject(
+            corpus,
+            case_id,
+            "private-key-a",
+            Some(&capability),
+            condition_id,
+            "unknown_critical_recipient",
+            built,
         );
     }
 
@@ -2954,8 +3204,8 @@ fn write_recipient_framing_cases(
         corpus,
         sources,
         "recipient-illegal-mixing",
-        "origin-recipient-illegal-mixing",
         "passphrase-main",
+        None,
         "argon2id_mixed_with_another_recipient",
         "incompatible_recipients",
         &file_key,
@@ -2968,52 +3218,59 @@ fn write_recipient_framing_cases(
     // §3.7 step 8 runs each of its two passes over every entry before it
     // reports, and settles between recipient types on the §4 registry index,
     // so the same two defective entries yield one class in either order. The
-    // first pair fails the framing pass and the body-content pass, which the
-    // framing pass wins; the second pair fails only body content, which the
-    // lower registry index wins.
-    for (case_id, condition_id, argon2id_first, x25519_body_short, class) in [
+    // first pair fails the framing pass, by the body length, and the
+    // body-content pass, which the framing pass wins; the second pair fails
+    // only body content, which the lower registry index wins; the third fails
+    // the framing pass by the critical flag, which wins as the first does.
+    for (case_id, condition_id, argon2id_first, damage_x25519, class) in [
         (
             "recipient-step8-length-before-content-argon2id-first",
             "argon2id_kdf_invalid_and_x25519_body_short_argon2id_first",
             true,
-            true,
+            shorten_body as fn(&mut RecipientEntry),
             "malformed_recipient_entry",
         ),
         (
             "recipient-step8-length-before-content-x25519-first",
             "argon2id_kdf_invalid_and_x25519_body_short_x25519_first",
             false,
-            true,
+            shorten_body,
             "malformed_recipient_entry",
         ),
         (
             "recipient-step8-order-argon2id-first",
             "argon2id_kdf_invalid_and_x25519_ephemeral_zero_argon2id_first",
             true,
-            false,
+            zero_x25519_ephemeral,
             "invalid_kdf_parameters",
         ),
         (
             "recipient-step8-order-x25519-first",
             "argon2id_kdf_invalid_and_x25519_ephemeral_zero_x25519_first",
             false,
-            false,
+            zero_x25519_ephemeral,
             "invalid_kdf_parameters",
+        ),
+        (
+            "recipient-step8-flags-before-content-argon2id-first",
+            "argon2id_kdf_invalid_and_x25519_critical_flag_set_argon2id_first",
+            true,
+            set_critical_flag,
+            "malformed_recipient_entry",
+        ),
+        (
+            "recipient-step8-flags-before-content-x25519-first",
+            "argon2id_kdf_invalid_and_x25519_critical_flag_set_x25519_first",
+            false,
+            set_critical_flag,
+            "malformed_recipient_entry",
         ),
     ] {
         let _scope = case_scope(case_id);
         let file_key = FileKey::generate().expect("file key");
-        let lanes_zero = KdfParams {
-            lanes: 0,
-            ..KdfParams::test_fast_default()
-        };
-        let bad_argon2id = argon2id_entry_with_kdf_params(&file_key, &lanes_zero);
+        let bad_argon2id = argon2id_entry_with_kdf_params(&file_key, &kdf_params_without_lanes());
         let mut bad_x25519 = x25519_entry(&keys.public_a, &file_key);
-        if x25519_body_short {
-            bad_x25519.body.pop();
-        } else {
-            bad_x25519.body[..x25519::PUBLIC_KEY_SIZE].fill(0);
-        }
+        damage_x25519(&mut bad_x25519);
         let entries = if argon2id_first {
             [bad_argon2id, bad_x25519]
         } else {
@@ -3023,8 +3280,8 @@ fn write_recipient_framing_cases(
             corpus,
             sources,
             case_id,
-            &format!("origin-{case_id}"),
             "passphrase-main",
+            None,
             condition_id,
             class,
             &file_key,
@@ -3032,13 +3289,367 @@ fn write_recipient_framing_cases(
             b"",
         );
     }
+
+    write_recipient_check_order_cases(corpus, sources, keys, base);
+}
+
+/// The `FORMAT.md` §3.3 check order, and §3.7 before any recipient is tried, by
+/// the method of [`write_prefix_check_order_cases`]. Some pairs need two
+/// entries, because no single entry can break both checks. Two rules order
+/// entries rather than checks, so pairs of checks cannot express them, and each
+/// has its own cases. §3.3 takes each entry through every check before it reads
+/// the next: a reader that runs one check over every entry before the next
+/// check fails `entry-order-whole-entry-before-next-entry`. §3.7 finishes each
+/// preflight step over every entry before the next step begins: a reader that
+/// makes a step-8 check while it parses the entries fails a
+/// `recipient-order-type-name-before-native-` case, and one that takes steps 6
+/// and 8 entry by entry fails a
+/// `recipient-order-unknown-critical-before-native-` case.
+fn write_recipient_check_order_cases(
+    corpus: &mut Corpus,
+    sources: &Path,
+    keys: &CorpusKeys,
+    base: &MutationBase,
+) {
+    use crate::recipient::entry::{
+        ENTRY_BODY_LEN_OFFSET, ENTRY_HEADER_SIZE, ENTRY_RECIPIENT_FLAGS_OFFSET,
+        ENTRY_TYPE_NAME_LEN_OFFSET,
+    };
+
+    let reserved_flag = |b: &mut Vec<u8>| {
+        write_u16_be(b, OFF_FIRST_ENTRY_FLAGS, RESERVED_RECIPIENT_FLAG_BIT);
+    };
+    let break_type_name = |b: &mut Vec<u8>| {
+        b[OFF_FIRST_ENTRY_TYPE_NAME] = UNGRAMMATICAL_TYPE_NAME_BYTE;
+    };
+    // The region holds one entry, so a second runs out of bytes before its
+    // entry header.
+    let declare_second_entry = |b: &mut Vec<u8>| write_u16_be(b, OFF_RECIPIENT_COUNT, 2);
+    let lanes_zero = |b: &mut Vec<u8>| {
+        b[OFF_FIRST_ARGON2ID_KDF_PARAMS..OFF_FIRST_ARGON2ID_KDF_PARAMS + KDF_PARAMS_SIZE]
+            .copy_from_slice(&kdf_params_without_lanes().to_bytes());
+    };
+
+    let cases: [ByteMutationCase; 9] = [
+        (
+            "entry-order-type-name-len-before-flags",
+            Box::new(move |b: &mut Vec<u8>| {
+                write_u16_be(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN, 0);
+                reserved_flag(b);
+                // The name's bytes now open the body, so the entry still fills
+                // its region.
+                let body_len = be_u32_at(b, OFF_FIRST_ENTRY_BODY_LEN);
+                let name_len = u32::try_from(argon2id::TYPE_NAME.len()).expect("name length");
+                write_u32_be(b, OFF_FIRST_ENTRY_BODY_LEN, body_len + name_len);
+            }),
+            "entry_type_name_len_zero_and_reserved_flag_bit_nonzero",
+            "malformed_recipient_entry",
+        ),
+        // A body length past the structural maximum also runs past the region,
+        // is over the local cap, and is not the `argon2id` length, and the
+        // reserved bit makes the native flags nonzero. Three of those are
+        // `malformed_recipient_entry` too; `entry-order-flags-before-fit`
+        // breaks all three and puts the reserved flag before them, so the two
+        // cases together fix this order.
+        (
+            "entry-order-body-len-before-flags",
+            Box::new(move |b: &mut Vec<u8>| {
+                write_u32_be(b, OFF_FIRST_ENTRY_BODY_LEN, crate::format::BODY_LEN_MAX + 1);
+                reserved_flag(b);
+            }),
+            "entry_body_len_above_structural_maximum_and_reserved_flag_bit_nonzero",
+            "malformed_recipient_entry",
+        ),
+        (
+            "entry-order-flags-before-fit",
+            Box::new(move |b: &mut Vec<u8>| {
+                reserved_flag(b);
+                let body_len = be_u32_at(b, OFF_FIRST_ENTRY_BODY_LEN);
+                write_u32_be(b, OFF_FIRST_ENTRY_BODY_LEN, body_len + 1);
+            }),
+            "entry_reserved_flag_bit_nonzero_and_entry_runs_past_region",
+            "recipient_flags_reserved",
+        ),
+        (
+            "entry-order-body-cap-before-type-name",
+            Box::new(move |b: &mut Vec<u8>| {
+                let cap = crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as usize;
+                grow_first_entry_body(b, cap + 1 - argon2id::BODY_LENGTH);
+                break_type_name(b);
+            }),
+            "entry_body_len_above_default_cap_and_type_name_violates_grammar",
+            "resource_cap_exceeded",
+        ),
+        (
+            "entry-order-type-name-before-trailing-bytes",
+            Box::new(move |b: &mut Vec<u8>| {
+                break_type_name(b);
+                pad_recipient_region(b, 1);
+            }),
+            "entry_type_name_violates_grammar_and_bytes_left_after_last_entry",
+            "malformed_type_name",
+        ),
+        // The region keeps the second entry's `type_name_len` and
+        // `recipient_flags` but not its `body_len`, so a reader that checks
+        // each field as it reads it sees the reserved flag first.
+        (
+            "entry-order-entry-header-before-flags",
+            Box::new(move |b: &mut Vec<u8>| {
+                let second = first_entry_end(b);
+                pad_recipient_region(b, ENTRY_BODY_LEN_OFFSET);
+                let name_len = u16::try_from(argon2id::TYPE_NAME.len()).expect("name length");
+                write_u16_be(b, second + ENTRY_TYPE_NAME_LEN_OFFSET, name_len);
+                write_u16_be(
+                    b,
+                    second + ENTRY_RECIPIENT_FLAGS_OFFSET,
+                    RESERVED_RECIPIENT_FLAG_BIT,
+                );
+                declare_second_entry(b);
+            }),
+            "second_entry_header_shorter_than_eight_bytes_and_reserved_flag_bit_nonzero",
+            "malformed_recipient_entry",
+        ),
+        (
+            "entry-order-whole-entry-before-next-entry",
+            Box::new(move |b: &mut Vec<u8>| {
+                break_type_name(b);
+                declare_second_entry(b);
+            }),
+            "entry_type_name_violates_grammar_and_second_entry_header_missing",
+            "malformed_type_name",
+        ),
+        (
+            "recipient-order-trailing-bytes-before-kdf-params",
+            Box::new(move |b: &mut Vec<u8>| {
+                lanes_zero(b);
+                pad_recipient_region(b, 1);
+            }),
+            "bytes_left_after_last_entry_and_argon2id_lanes_below_structural_minimum",
+            "malformed_recipient_entry",
+        ),
+        (
+            "recipient-order-entry-header-before-kdf-params",
+            Box::new(move |b: &mut Vec<u8>| {
+                lanes_zero(b);
+                declare_second_entry(b);
+            }),
+            "second_entry_header_missing_and_argon2id_lanes_below_structural_minimum",
+            "malformed_recipient_entry",
+        ),
+    ];
+    for (case_id, mutate, condition_id, class) in cases {
+        mutate_fcr(
+            corpus,
+            base,
+            case_id,
+            "passphrase-main",
+            condition_id,
+            class,
+            mutate,
+        );
+    }
+
+    // The rest need entries the base does not have, so they start from files
+    // built here. A reader that implements the unknown type stops refusing the
+    // critical entry, so a case whose class comes from that entry is
+    // capability-relative.
+    let unknown_type = format!("recipient_type:{UNKNOWN_RECIPIENT_TYPE}");
+    let damaged_x25519 = |file_key: &FileKey, damage: fn(&mut RecipientEntry)| {
+        let mut entry = x25519_entry(&keys.public_a, file_key);
+        damage(&mut entry);
+        entry
+    };
+    let break_second_type_name = |b: &mut Vec<u8>| {
+        let second_type_name = first_entry_end(b) + ENTRY_HEADER_SIZE;
+        b[second_type_name] = UNGRAMMATICAL_TYPE_NAME_BYTE;
+    };
+    let crafted = |corpus: &mut Corpus,
+                   case_id: &str,
+                   credential_id: &str,
+                   capability_id: Option<&str>,
+                   (condition_id, class): (&str, &str),
+                   entries: &dyn Fn(&FileKey) -> Vec<RecipientEntry>| {
+        let _scope = case_scope(case_id);
+        let file_key = FileKey::generate().expect("file key");
+        crafted_reject_case(
+            corpus,
+            sources,
+            case_id,
+            credential_id,
+            capability_id,
+            condition_id,
+            class,
+            &file_key,
+            &entries(&file_key),
+            b"",
+        )
+    };
+
+    let lone_critical = crafted(
+        corpus,
+        "recipient-order-unknown-critical-before-none-supported",
+        "passphrase-main",
+        Some(&unknown_type),
+        (
+            "critical_recipient_type_unsupported_and_no_supported_recipient",
+            "unknown_critical_recipient",
+        ),
+        &|_| vec![unknown_entry(true)],
+    );
+    let lone_critical_cases: [ByteMutationCase; 2] = [
+        (
+            "recipient-order-trailing-bytes-before-unknown-critical",
+            Box::new(|b: &mut Vec<u8>| pad_recipient_region(b, 1)),
+            "bytes_left_after_last_entry_and_critical_recipient_type_unsupported",
+            "malformed_recipient_entry",
+        ),
+        (
+            "recipient-order-entry-header-before-unknown-critical",
+            Box::new(declare_second_entry),
+            "second_entry_header_missing_and_critical_recipient_type_unsupported",
+            "malformed_recipient_entry",
+        ),
+    ];
+    for (case_id, mutate, condition_id, class) in lone_critical_cases {
+        mutate_fcr(
+            corpus,
+            &lone_critical,
+            case_id,
+            "passphrase-main",
+            condition_id,
+            class,
+            mutate,
+        );
+    }
+    // An entry of an unknown type, so no step-8 length rule shares the class
+    // of the fit.
+    mutate_fcr(
+        corpus,
+        &lone_critical,
+        "entry-order-fit-before-body-cap",
+        "passphrase-main",
+        "entry_runs_past_region_and_body_len_above_default_cap",
+        "malformed_recipient_entry",
+        |b| {
+            write_u32_be(
+                b,
+                OFF_FIRST_ENTRY_BODY_LEN,
+                crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT + 1,
+            )
+        },
+    );
+
+    let short_then_critical = crafted(
+        corpus,
+        "recipient-order-unknown-critical-before-native-length-x25519-first",
+        "private-key-a",
+        Some(&unknown_type),
+        (
+            "critical_recipient_type_unsupported_and_x25519_body_short_x25519_first",
+            "unknown_critical_recipient",
+        ),
+        &|file_key| vec![damaged_x25519(file_key, shorten_body), unknown_entry(true)],
+    );
+    // The second entry keeps its critical flag; its malformed type name is
+    // found first.
+    mutate_fcr(
+        corpus,
+        &short_then_critical,
+        "recipient-order-type-name-before-native-length",
+        "private-key-a",
+        "x25519_body_short_and_second_entry_type_name_violates_grammar",
+        "malformed_type_name",
+        break_second_type_name,
+    );
+    crafted(
+        corpus,
+        "recipient-order-unknown-critical-before-native-length-unknown-first",
+        "private-key-a",
+        Some(&unknown_type),
+        (
+            "critical_recipient_type_unsupported_and_x25519_body_short_unknown_first",
+            "unknown_critical_recipient",
+        ),
+        &|file_key| vec![unknown_entry(true), damaged_x25519(file_key, shorten_body)],
+    );
+
+    // The same three for a native entry whose critical flag is set, the other
+    // step-8 framing check.
+    let flagged_then_critical = crafted(
+        corpus,
+        "recipient-order-unknown-critical-before-native-flags-x25519-first",
+        "private-key-a",
+        Some(&unknown_type),
+        (
+            "critical_recipient_type_unsupported_and_x25519_critical_flag_set_x25519_first",
+            "unknown_critical_recipient",
+        ),
+        &|file_key| {
+            vec![
+                damaged_x25519(file_key, set_critical_flag),
+                unknown_entry(true),
+            ]
+        },
+    );
+    mutate_fcr(
+        corpus,
+        &flagged_then_critical,
+        "recipient-order-type-name-before-native-flags",
+        "private-key-a",
+        "x25519_critical_flag_set_and_second_entry_type_name_violates_grammar",
+        "malformed_type_name",
+        break_second_type_name,
+    );
+    crafted(
+        corpus,
+        "recipient-order-unknown-critical-before-native-flags-unknown-first",
+        "private-key-a",
+        Some(&unknown_type),
+        (
+            "critical_recipient_type_unsupported_and_x25519_critical_flag_set_unknown_first",
+            "unknown_critical_recipient",
+        ),
+        &|file_key| {
+            vec![
+                unknown_entry(true),
+                damaged_x25519(file_key, set_critical_flag),
+            ]
+        },
+    );
+
+    crafted(
+        corpus,
+        "recipient-order-body-content-before-mixing",
+        "passphrase-main",
+        None,
+        (
+            "x25519_ephemeral_all_zero_and_argon2id_mixed_with_another_recipient",
+            "malformed_recipient_entry",
+        ),
+        &|file_key| {
+            let zero_ephemeral = damaged_x25519(file_key, zero_x25519_ephemeral);
+            vec![argon2id_entry(file_key), zero_ephemeral]
+        },
+    );
 }
 
 // ─── Native recipient bodies ───────────────────────────────────────────────
 
 /// Offset of a single recipient's body: the entry header plus its type name.
-fn body_offset(type_name: &str) -> usize {
+const fn body_offset(type_name: &str) -> usize {
     OFF_FIRST_ENTRY_TYPE_NAME + type_name.len()
+}
+
+/// Offset of `kdf_params` in a `.fcr` whose first recipient is `argon2id`
+/// (`FORMAT.md` §4.1).
+const OFF_FIRST_ARGON2ID_KDF_PARAMS: usize = body_offset(argon2id::TYPE_NAME) + ARGON2_SALT_SIZE;
+
+/// The fast test parameters with no lanes, the one §2.2 bound they break.
+fn kdf_params_without_lanes() -> KdfParams {
+    KdfParams {
+        lanes: 0,
+        ..KdfParams::test_fast_default()
+    }
 }
 
 /// Commits a copy of an already-published artifact as a new case, for a rule
@@ -3066,7 +3677,7 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
     // §4.1 body: argon2_salt(32) || kdf_params(12) || wrap_nonce(24) ||
     // wrapped_file_key(48).
     let salt = body;
-    let kdf = body + ARGON2_SALT_SIZE;
+    let kdf = OFF_FIRST_ARGON2ID_KDF_PARAMS;
     let nonce = kdf + KDF_PARAMS_SIZE;
     let wrapped = nonce + WRAP_NONCE_SIZE;
 
@@ -3203,26 +3814,19 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
         ),
     ] {
         let _scope = case_scope(case_id);
-        let source = write_source(sources, SOURCE_FILE_NAME, 64);
         let file_key = FileKey::generate().expect("file key");
         let entry = argon2id_entry_with_kdf_params(&file_key, &params);
-        let built = build_fcr_with_entries(&source, &file_key, std::slice::from_ref(&entry), b"");
-        let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
-        let origin_id = format!("origin-{case_id}");
-        corpus.push_origin(OriginRow {
-            origin_id: origin_id.clone(),
-            origin_kind: "fcr_payload",
-            anchor_case_id: case_id.to_string(),
-            payload_key_ref: "-".to_string(),
-            payload_key_sha3_256: built.payload_key_sha3_256,
-            stream_nonce_hex: built.stream_nonce_hex,
-        });
-        corpus.push_case(
-            CaseRow::fcr(case_id, &artifact_ref)
-                .origin(&origin_id)
-                .fabricated()
-                .credential("passphrase-main")
-                .reject(condition, class),
+        crafted_reject_case(
+            corpus,
+            sources,
+            case_id,
+            "passphrase-main",
+            None,
+            condition,
+            class,
+            &file_key,
+            std::slice::from_ref(&entry),
+            b"",
         );
     }
 }
@@ -3472,8 +4076,8 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             corpus,
             sources,
             case_id,
-            &format!("origin-{case_id}"),
             "passphrase-main",
+            None,
             condition,
             class,
             &file_key,
@@ -3512,22 +4116,14 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
         &entries,
         &tlv_bytes(UNKNOWN_CRITICAL_TAG, b"x"),
     );
-    let artifact_ref = corpus.write_ref("artifacts/fcr/tlv-unknown-critical.fcr", &built.bytes);
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-tlv-unknown-critical".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "tlv-unknown-critical".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: built.payload_key_sha3_256,
-        stream_nonce_hex: built.stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("tlv-unknown-critical", &artifact_ref)
-            .origin("origin-tlv-unknown-critical")
-            .fabricated()
-            .credential("passphrase-main")
-            .capability(&critical_tag_capability("outer_tlv"))
-            .reject("tlv_critical_tag_unsupported", "unknown_critical_tlv"),
+    commit_crafted_reject(
+        corpus,
+        "tlv-unknown-critical",
+        "passphrase-main",
+        Some(&critical_tag_capability("outer_tlv")),
+        "tlv_critical_tag_unsupported",
+        "unknown_critical_tlv",
+        built,
     );
     drop(scope);
 }
@@ -4336,9 +4932,9 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
 /// pair the other cases leave open, alone or through such a chain. A step whose
 /// outcomes differ in class, the version, counts as one check per class. The
 /// type's own rules cannot be broken together with type support or with a
-/// malformed type name, so no chain reaches them through those checks. No
-/// chain needs a capability-relative case, so a reader that declares a
-/// capability loses only the pairs whose earlier check that capability changes.
+/// malformed type name, so no chain reaches them through those checks. Only a
+/// pair with a check that a capability changes rests on a capability-relative
+/// case, so a reader that declares a capability loses only such pairs.
 fn write_public_key_order_cases(corpus: &mut Corpus, private_key: &[u8]) {
     use crate::key::public::{
         PAYLOAD_HEADER_SIZE, PUBLIC_KEY_CHECKSUM_SIZE, PUBLIC_KEY_FILE_READ_CAP_BYTES,
@@ -5662,16 +6258,15 @@ fn private_key_case_through_both_readers(
 /// those steps. A reader must make every two checks that report different
 /// classes, and that one file can break together, in the stated order. A case
 /// that breaks both, and no check before them, fixes their order directly: a
-/// reader that makes the two the other way round reports the later one's
-/// class. Two such facts, one check before a second and the second before a
-/// third, fix the first before the third. These cases supply every pair the
-/// other cases leave open, alone or through such a chain. A step whose
-/// outcomes differ in class, the version and the extension rules, counts as
-/// one check per class. The type's own rules cannot be broken together with
-/// type support or with a malformed type name, so no chain reaches them
-/// through those checks. No chain needs a capability-relative case, so a
-/// reader that declares a capability loses only the pairs whose earlier check
-/// that capability changes.
+/// reader that makes the two the other way round reports the later one's class.
+/// Two such facts, one check before a second and the second before a third, fix
+/// the first before the third. These cases supply every pair the other cases
+/// leave open, alone or through such a chain. A step whose outcomes differ in
+/// class, the version and the extension rules, counts as one check per class.
+/// The type's own rules cannot be broken together with type support or with a
+/// malformed type name, so no chain reaches them through those checks. Only a
+/// pair with a check that a capability changes rests on a capability-relative
+/// case, so a reader that declares a capability loses only such pairs.
 fn write_private_key_order_cases(
     corpus: &mut Corpus,
     canonical: &[u8],
@@ -6940,24 +7535,14 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         .collect();
     let built = build_fcr_with_entries(&source, &file_key, &many, b"");
     drop(scope);
-    let artifact_ref = corpus.write_ref(
-        "artifacts/fcr/header-recipient-count-over-default-cap.fcr",
-        &built.bytes,
-    );
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-header-recipient-count-over-default-cap".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "header-recipient-count-over-default-cap".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: built.payload_key_sha3_256,
-        stream_nonce_hex: built.stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("header-recipient-count-over-default-cap", &artifact_ref)
-            .origin("origin-header-recipient-count-over-default-cap")
-            .fabricated()
-            .credential("private-key-a")
-            .reject("recipient_count_above_default_cap", "resource_cap_exceeded"),
+    commit_crafted_reject(
+        corpus,
+        "header-recipient-count-over-default-cap",
+        "private-key-a",
+        None,
+        "recipient_count_above_default_cap",
+        "resource_cap_exceeded",
+        built,
     );
 
     // Exactly the cap, with the decrypting key in the last slot so a reader
@@ -6987,27 +7572,14 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let entries = [big_body, argon2id_entry(&file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     drop(scope);
-    let artifact_ref = corpus.write_ref(
-        "artifacts/fcr/recipient-body-over-default-cap.fcr",
-        &built.bytes,
-    );
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-recipient-body-over-default-cap".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "recipient-body-over-default-cap".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: built.payload_key_sha3_256,
-        stream_nonce_hex: built.stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("recipient-body-over-default-cap", &artifact_ref)
-            .origin("origin-recipient-body-over-default-cap")
-            .fabricated()
-            .credential("passphrase-main")
-            .reject(
-                "recipient_body_len_above_default_cap",
-                "resource_cap_exceeded",
-            ),
+    commit_crafted_reject(
+        corpus,
+        "recipient-body-over-default-cap",
+        "passphrase-main",
+        None,
+        "recipient_body_len_above_default_cap",
+        "resource_cap_exceeded",
+        built,
     );
 
     // Exactly the cap on an unknown non-critical entry, which the reader must
@@ -7076,7 +7648,7 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
     let material = decode_public_key_file(&keys.public_a)
         .to_x25519_bytes()
         .expect("decode the corpus public key");
-    let body_kdf_params = body_offset(argon2id::TYPE_NAME) + ARGON2_SALT_SIZE;
+    let body_kdf_params = OFF_FIRST_ARGON2ID_KDF_PARAMS;
     let key_kdf_params = KDF_PARAMS_OFFSET;
     let kdf = KdfParams::test_fast_default();
 
@@ -7354,8 +7926,8 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
             corpus,
             sources,
             case_id,
-            &format!("origin-{case_id}"),
             "private-key-a",
+            None,
             "header_mac_work_above_local_cap",
             "resource_cap_exceeded",
             &file_key,

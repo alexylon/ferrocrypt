@@ -39,6 +39,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ferrocrypt::FormatDefect;
+
 const TEST_WORKSPACE: &str = "tests/cli_workspace";
 /// Mirrors `INTERNAL_TEST_FAST_KDF_ENV` in the cli binary's production
 /// source. The cli's `cfg(debug_assertions)` branch reads this name and
@@ -1101,6 +1103,50 @@ fn test_cli_decrypt_rejects_recipient_flag() {
         stderr.contains("unexpected") || stderr.to_lowercase().contains("argument"),
         "expected clap unrecognized-flag error, got: {stderr}"
     );
+}
+
+/// `FORMAT.md` §3.1 checks the length of the `.fcr` prefix before its
+/// magic: a file shorter than the prefix is reported as too short whatever
+/// bytes it holds, and a file of at least that length without the magic as
+/// not a FerroCrypt file.
+#[test]
+fn test_cli_decrypt_reports_a_short_file_before_its_magic() {
+    const PREFIX_LEN: usize = 12;
+    let test_dir = setup_test_dir("cli_decrypt_short_input");
+    let binary = get_binary_path();
+
+    for (len, defect, other) in [
+        (
+            PREFIX_LEN - 1,
+            FormatDefect::Truncated,
+            FormatDefect::BadMagic,
+        ),
+        (PREFIX_LEN, FormatDefect::BadMagic, FormatDefect::Truncated),
+    ] {
+        let input = test_dir.join(format!("{len}-bytes.fcr"));
+        fs::write(&input, vec![b'x'; len]).unwrap();
+        let output = cli_command(&binary)
+            .arg("decrypt")
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(&test_dir)
+            .env_remove("FERROCRYPT_PASSPHRASE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("decrypt");
+        assert!(!output.status.success(), "{len} bytes: decrypt succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = defect.to_string();
+        assert!(
+            stderr.contains(&expected),
+            "{len} bytes: expected {expected:?}, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&other.to_string()),
+            "{len} bytes: reported {other:?} too, got: {stderr}"
+        );
+    }
 }
 
 #[test]

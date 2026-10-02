@@ -1064,6 +1064,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_prefers_bad_magic_over_wrong_kind() {
+        // FORMAT.md §3.1 checks the magic before the kind.
+        let mut bytes = Prefix::build_encrypted(HEADER_FIXED_SIZE as u32).unwrap();
+        bytes[0] ^= 0xFF;
+        bytes[PREFIX_KIND_OFFSET] = KIND_PRIVATE_KEY;
+        match Prefix::parse(&bytes, Kind::Encrypted) {
+            Err(CryptoError::InvalidFormat(FormatDefect::BadMagic)) => {}
+            other => panic!("expected BadMagic before WrongKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_prefix_reports_a_short_input_before_its_magic() {
+        // FORMAT.md §3.1 checks the length of the prefix before its magic.
+        let mut reader: &[u8] = &[0xFF; PREFIX_SIZE - 1];
+        match read_prefix_from_reader(&mut reader, Kind::Encrypted) {
+            Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
+            other => panic!("expected Truncated before BadMagic, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn header_fixed_round_trips() {
         let hf = HeaderFixed {
             header_flags: 0,

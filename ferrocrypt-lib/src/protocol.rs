@@ -380,11 +380,12 @@ pub(crate) fn preflight_header_write_limits(
 /// 10. Nothing here unlocks a key, derives one, or authenticates
 /// anything.
 ///
-/// Both reader entry points go through this one function —
-/// [`DecryptSession::open`] and [`crate::probe_recipient_mode_with_limits`]
-/// — so a probe cannot report a file as classifiable that the decrypt
-/// path would refuse under the same limits, and a preflight rule added
-/// later cannot reach one path but not the other.
+/// Every reader entry point reaches this one function through
+/// [`DecryptSession::from_file`] — decryption, [`crate::Decryptor::open`],
+/// and [`crate::probe_recipient_mode_with_limits`] — so neither the probe
+/// nor `open` can report a file as classifiable that the decrypt path would
+/// refuse under the same limits, and a preflight rule added later cannot
+/// reach one path but not the others.
 pub(crate) fn classify_recipients_within_limits(
     parsed: &ParsedEncryptedHeader,
     limits: HeaderReadLimits,
@@ -406,9 +407,10 @@ pub(crate) fn classify_recipients_within_limits(
 /// An encrypted input prepared for decryption. It contains the opened file,
 /// its structurally parsed header, and its classified recipient mode.
 ///
-/// [`DecryptSession::open`] performs the non-cryptographic steps from
+/// [`DecryptSession::from_file`] performs the non-cryptographic steps from
 /// `FORMAT.md` §3.7: bounded header reading, structural parsing, resource-limit
-/// checks, and recipient classification. The file remains open at the first
+/// checks, and recipient classification. [`DecryptSession::open`] opens a path
+/// and hands the file to it. The file remains open at the first
 /// payload byte, so [`decrypt_session`] continues from the same file. This is
 /// important when credential work occurs between validation and decryption,
 /// such as unlocking a private key with Argon2id: replacing the path during
@@ -428,7 +430,24 @@ impl DecryptSession {
     ) -> Result<Self, CryptoError> {
         // `open_input_file` rejects FIFOs, sockets, and device nodes
         // without waiting. Encryption rejects the same input types.
-        let mut encrypted_file = open_input_file(input_path)?;
+        Self::from_file(open_input_file(input_path)?, header_read_limits)
+    }
+
+    /// Reads the header of `encrypted_file` from its first byte, whatever
+    /// the file's position, under `header_read_limits`, and classifies its
+    /// recipients without performing key operations. The caller opens the file
+    /// through `open_input_file`, which refuses FIFOs, sockets, and device nodes
+    /// without blocking. Every reader entry point goes through this function:
+    /// decryption, `Decryptor::open`, and `probe_recipient_mode_with_limits`.
+    pub(crate) fn from_file(
+        mut encrypted_file: fs::File,
+        header_read_limits: HeaderReadLimits,
+    ) -> Result<Self, CryptoError> {
+        use std::io::{Seek, SeekFrom};
+
+        encrypted_file
+            .seek(SeekFrom::Start(0))
+            .map_err(CryptoError::Io)?;
 
         // Steps 1–4: read and parse the header without cryptographic
         // work, enforcing local limits before allocation.

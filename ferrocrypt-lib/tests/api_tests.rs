@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
-    KdfParams, KeyPairGenerator, KeyReadLimits, PrivateKey, PublicKey, probe_recipient_mode,
+    KdfParams, KeyPairGenerator, KeyReadLimits, MAGIC, PrivateKey, PublicKey, probe_recipient_mode,
     probe_recipient_mode_with_limits,
 };
 use ferrocrypt_test_support::{
@@ -466,6 +466,49 @@ fn decryptor_open_rejects_non_fcr_file() {
     match err {
         CryptoError::InvalidFormat(FormatDefect::BadMagic) => {}
         other => panic!("expected InvalidFormat(BadMagic), got {other:?}"),
+    }
+}
+
+/// `FORMAT.md` §3.1 checks the length of the 12-byte prefix before its magic,
+/// so `Decryptor::open` reports an input shorter than a prefix as truncated
+/// whatever its bytes, and only one of at least 12 bytes without the magic as
+/// `BadMagic`. The probe routes every input without the magic to encryption,
+/// the first bytes of the magic alone included, and reports the magic alone as
+/// a file cut short.
+#[test]
+fn decryptor_open_checks_the_prefix_length_before_the_magic() {
+    const PREFIX_LEN: usize = 12;
+
+    let work = fresh_workspace("open_prefix_length");
+    for (contents, expected) in [
+        (Vec::new(), FormatDefect::Truncated),
+        (MAGIC[..MAGIC.len() - 1].to_vec(), FormatDefect::Truncated),
+        (MAGIC.to_vec(), FormatDefect::Truncated),
+        (vec![b'x'; PREFIX_LEN - 1], FormatDefect::Truncated),
+        (vec![b'x'; PREFIX_LEN], FormatDefect::BadMagic),
+    ] {
+        let len = contents.len();
+        let path = work.join(format!("input-{len}.bin"));
+        fs::write(&path, &contents).unwrap();
+        match Decryptor::open(&path).unwrap_err() {
+            CryptoError::InvalidFormat(defect) if defect == expected => {}
+            other => panic!("{len} bytes: expected InvalidFormat({expected:?}), got {other:?}"),
+        }
+        let probed = probe_recipient_mode(&path);
+        if contents.starts_with(&MAGIC) {
+            assert!(
+                matches!(
+                    probed,
+                    Err(CryptoError::InvalidFormat(FormatDefect::Truncated))
+                ),
+                "{len} bytes: the magic alone is a FerroCrypt file cut short, got {probed:?}"
+            );
+        } else {
+            assert!(
+                matches!(probed, Ok(None)),
+                "{len} bytes: an input without the magic routes to encryption, got {probed:?}"
+            );
+        }
     }
 }
 
@@ -2067,6 +2110,36 @@ fn decryptor_open_reports_permission_error_not_missing_input() {
         }
         other => panic!("expected Io(PermissionDenied), got {other:?}"),
     }
+}
+
+/// A directory its user cannot read fails to open with a permission error,
+/// as every directory does on Windows. `Decryptor::open` must still report it
+/// as a directory rather than as an I/O failure, and the probe routes it like
+/// any other directory. Root opens such a directory, so there the opened
+/// handle decides instead, with the same outcome.
+#[cfg(unix)]
+#[test]
+fn decryptor_open_reports_an_unreadable_directory_as_a_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let work = fresh_workspace("open_unreadable_dir");
+    let unreadable = work.join("unreadable");
+    fs::create_dir_all(&unreadable).unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    let opened = Decryptor::open(&unreadable);
+    let probed = probe_recipient_mode(&unreadable);
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+
+    match opened {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(msg.contains("directory"), "unexpected message: {msg:?}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+    assert!(
+        matches!(probed, Ok(None)),
+        "the probe routes a directory to encryption, got {probed:?}"
+    );
 }
 
 /// `PrivateKeyDecryptor::key_read_limits` must reach the `private.key`

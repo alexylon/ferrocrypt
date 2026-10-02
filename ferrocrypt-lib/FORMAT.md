@@ -586,15 +586,17 @@ order, `stream_nonce`, and `ext_bytes`.
 
 Readers MUST process `.fcr` files in this order:
 
-1. Read the 12-byte prefix.
-2. Reject bad magic; reject `.fcr` outer-container version byte `0x00` as
-   structurally malformed; reject an unsupported nonzero outer-container
-   version, wrong kind, non-zero prefix flags, or
-   `header_len > 16,777,216`.
-3. Read exactly `header_len` bytes of `header` and exactly 32 bytes of
-   `header_mac`; reject if either read reaches EOF early.
-4. Structurally parse `header_fixed`, reject non-zero `header_flags`, and parse
-   recipient entries.
+1. Read the 12-byte prefix; reject an input shorter than that as `truncated`,
+   the first §3.1 check.
+2. Make the other §3.1 prefix checks in the order §3.1 gives: reject bad
+   magic, a wrong kind, `.fcr` outer-container version byte `0x00` as
+   structurally malformed, an unsupported nonzero outer-container version,
+   non-zero prefix flags, and `header_len > 16,777,216`.
+3. Reject a `header_len` above the reader's local cap (§3.2), then read exactly
+   `header_len` bytes of `header` and exactly 32 bytes of `header_mac`; reject
+   if either read reaches EOF early.
+4. Make the rest of the §3.2 header checks in the order §3.2 gives, then parse
+   the recipient entries in the order §3.3 gives.
 5. Reject any recipient entry with reserved recipient flag bits set.
 6. Reject unknown recipient entries with `critical = 1`.
 7. Skip unknown recipient entries with `critical = 0`; their bodies remain
@@ -3051,12 +3053,13 @@ reused operationally.
 | Prefix and framing | Bad magic; an invariant `.fcr` outer-container version `0x00` case classified as `malformed_header`; a `.fcr` outer-container version `0x02` capability case classified as `unsupported_outer_version`; wrong kind; nonzero flags; the structural maximum; truncation at each framing boundary; and both undersized-header precedence outcomes |
 | Header | Fixed-field accounting, recipient count and range, extension length, header-MAC tamper after successful unwrap, and exact authenticated scope |
 | Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, illegal mixing, and one step-8 diagnostic class for both orders of the same two defective entries |
+| `.fcr` check order | Files that each break at least two checks and none before them, enough to fix the order of every two checks of §3.1 to §3.3, and of §3.7 before any recipient is tried, that report different classes and that one file can break together, counting the version byte as one check per class and leaving out the header-MAC work cap, whose place §3.2 only recommends; a first entry that breaks the last §3.3 check before a second entry the region holds no bytes for; and both orders of an unknown critical entry beside a native entry of the wrong length, and beside one with its critical flag set |
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid KDF parameters on every structural dimension, every local KDF cap a structurally valid body can exceed, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, oversized region and value, and a malformed entry after an unknown critical tag |
 | Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of more than 256 TiB (§12.1) |
-| `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; wrong lengths; a `private.key`, a `private.key` of a newer version, and an encrypted file given to the reader (§7.1); and files that each break two checks and none before them, enough to fix the order of every two checks of §7.1 and §7 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
-| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; the §8 `public.key` check through both readers (the `fcr1` prefix alone, the prefix followed by bytes that are not UTF-8, a `public.key` of a newer version or with a damaged checksum, and a key with a leading space) and through the unlock for a `public.key` longer than the default recipient-string cap; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; public/secret consistency; and files that each break two checks and none before them, through each reader that makes both, enough to fix the order of every two checks of §8 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
+| `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; wrong lengths; a `private.key`, a `private.key` of a newer version, and an encrypted file given to the reader (§7.1); and files that each break at least two checks and none before them, enough to fix the order of every two checks of §7.1 and §7 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
+| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; the §8 `public.key` check through both readers (the `fcr1` prefix alone, the prefix followed by bytes that are not UTF-8, a `public.key` of a newer version or with a damaged checksum, and a key with a leading space) and through the unlock for a `public.key` longer than the default recipient-string cap; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; public/secret consistency; and files that each break at least two checks and none before them, through each reader that makes both, enough to fix the order of every two checks of §8 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |
 | FCA manifest and tree | File and directory entries, acceptance of canonical and permitted noncanonical order, duplicate and ASCII-case-colliding paths, missing parents, child under file, multiple roots, invalid kinds, modes, sizes, and totals |
 | FCA paths | Absolute, parent, and current components; separators; NUL, control, and reserved characters; trailing dot and space; Windows device names; depth, component, and total-length limits; valid Unicode |

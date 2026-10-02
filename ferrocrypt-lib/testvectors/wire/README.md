@@ -232,20 +232,35 @@ recipient string, whose key-material cases include the longest well-formed
 string of 19,999 characters. Such a profile evidences the structural limit,
 not the cap it raises.
 
-The key-file cases also fix the whole check order of §7.1, §7, and §8. A case
-that breaks two checks, and none before them, fixes the order of the two, and
-such cases chain: one check before a second and the second before a third put
-the first before the third. Together they fix the order of every two checks that
-report different classes and that one file can break together, with a step whose
-outcomes differ in class, such as the version, counted as one check per class.
-No chain needs a capability-relative case, so a reader that declares a
-capability loses only the pairs whose earlier check that capability changes.
-Every `private-key-order-` case also runs through the unlock, as a
-`private-key-open-order-` case, because the unlock makes both of its checks too;
-a `private-key-open-order-` case with no such twin orders steps validation
-skips. Only a string too short to hold a payload's fixed fields can break the
-recipient-string cap and the payload size together, so that case runs under
-`zero-recipient-string-cap`, which sets the cap to zero.
+The `.fcr` and key-file cases also fix the whole check order of §3.1 to §3.3, of
+§3.7 before any recipient is tried, and of §7.1, §7, and §8. A case that breaks
+two checks, and none before them, fixes the order of the two, and such cases
+chain: one check before a second and the second before a third put the first
+before the third. A case that also breaks a later check of the class it expects
+fixes the order only together with the cases that put that later check after the
+others. The checks on recipient entries run as one block, so a check outside
+them that comes before or after one of them comes before or after them all.
+Together the cases fix the order of every two checks that report different
+classes and that one file can break together, with a step whose outcomes differ
+in class, such as the version, counted as one check per class. Only a pair with
+a check that a capability changes rests on a capability-relative case, so a
+reader that declares a capability loses only such pairs. A recipient type the
+reader implements changes two checks: whether an entry of that type is unknown
+and critical, and whether the file holds a supported recipient. The header-MAC
+work cap has no such case, because §3.2 only recommends where a reader applies
+it. Two `.fcr` rules order entries rather than checks, so each has its own
+cases. §3.3 takes each entry through every check before it reads the next:
+`entry-order-whole-entry-before-next-entry` has a malformed first type name and
+a second entry the region holds no bytes for. §3.7 finishes each step over every
+entry before the next step begins: the
+`recipient-order-unknown-critical-before-native-` cases put an unknown critical
+entry before and after an `x25519` entry one byte short, and before and after
+one with its critical flag set. Every `private-key-order-` case also runs
+through the unlock, as a `private-key-open-order-` case, because the unlock
+makes both of its checks too; a `private-key-open-order-` case with no such twin
+orders steps validation skips. Only a string too short to hold a payload's fixed
+fields can break the recipient-string cap and the payload size together, so that
+case runs under `zero-recipient-string-cap`, which sets the cap to zero.
 
 The length fields of both key files and of a recipient entry also have cases on
 their lower bounds, the type-name length through `t`, the shortest name the §3.3

@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 use crate::passphrase::Passphrase;
 
 use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
-use crate::container::{self, HeaderReadLimits};
+use crate::container::HeaderReadLimits;
 use crate::crypto::kdf::{KdfLimit, KdfParams};
-use crate::error::{FormatDefect, sanitize_path_for_display};
+use crate::error::sanitize_path_for_display;
 use crate::format;
 use crate::fs::paths;
 use crate::key::limits::KeyReadLimits;
@@ -533,17 +533,22 @@ impl Decryptor {
     /// # Errors
     ///
     /// Returns [`CryptoError::InputPath`] if `input` does not exist and
-    /// [`CryptoError::InvalidInput`] if `input` is a directory. Files that do
-    /// not contain a FerroCrypt header return [`CryptoError::InvalidFormat`]
-    /// with [`FormatDefect::BadMagic`]. Malformed headers, unsupported
-    /// versions, unknown critical recipients, and illegal recipient mixes return
-    /// their corresponding `CryptoError` or [`FormatDefect`] variants. A
-    /// passphrase recipient whose stored Argon2id parameters are outside the
-    /// bounds `FORMAT.md` §2.2 permits returns
-    /// [`CryptoError::InvalidKdfParams`]. A header shape, or an aggregate
-    /// header-MAC work total, above [`HeaderReadLimits::default`] returns the
-    /// matching `*CapExceeded` variant; use [`Decryptor::open_with_limits`] to
-    /// raise the caps.
+    /// [`CryptoError::InvalidInput`] if `input` is a directory. An input
+    /// shorter than the 12-byte `.fcr` prefix returns
+    /// [`CryptoError::InvalidFormat`] with
+    /// [`FormatDefect::Truncated`](crate::FormatDefect::Truncated) whatever its
+    /// bytes, because `FORMAT.md` §3.1 checks the length of the prefix before
+    /// its magic. An input of at least 12 bytes that does not open with the
+    /// FerroCrypt magic returns
+    /// [`FormatDefect::BadMagic`](crate::FormatDefect::BadMagic). Malformed
+    /// headers, unsupported versions, unknown critical recipients, and illegal
+    /// recipient mixes return their corresponding `CryptoError` or
+    /// [`FormatDefect`](crate::FormatDefect) variants. A passphrase recipient
+    /// whose stored Argon2id parameters are outside the bounds `FORMAT.md` §2.2
+    /// permits returns [`CryptoError::InvalidKdfParams`]. A header shape, or an
+    /// aggregate header-MAC work total, above [`HeaderReadLimits::default`]
+    /// returns the matching `*CapExceeded` variant; use
+    /// [`Decryptor::open_with_limits`] to raise the caps.
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError> {
         Self::open_inner(input.as_ref(), None)
     }
@@ -576,16 +581,19 @@ impl Decryptor {
         input: &Path,
         header_read_limits: Option<HeaderReadLimits>,
     ) -> Result<Self, CryptoError> {
-        let input = input.to_path_buf();
-        if input.is_dir() {
+        let Some(file) = open_header_input(input)? else {
             return Err(CryptoError::InvalidInput(format!(
                 "Cannot decrypt a directory: {}",
-                sanitize_path_for_display(&input)
+                sanitize_path_for_display(input)
             )));
-        }
+        };
+        // Read the header as decryption does, with no magic shortcut, so a
+        // file that is not a FerroCrypt file is reported in the `FORMAT.md`
+        // §3.1 order: the length of the prefix before its magic.
         let mode =
-            probe_recipient_mode_with_limits(&input, header_read_limits.unwrap_or_default())?
-                .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
+            protocol::DecryptSession::from_file(file, header_read_limits.unwrap_or_default())?
+                .mode();
+        let input = input.to_path_buf();
         match mode {
             UnauthenticatedRecipientMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
                 input,
@@ -1246,9 +1254,14 @@ pub fn generate_key_pair(
 /// for an authenticated mode value see [`AuthenticatedRecipientMode`] on
 /// [`DecryptOutcome`].
 ///
-/// Returns `Ok(None)` if the path is a directory, the file is empty, or the
-/// first 4 bytes are not the FerroCrypt magic. These cases mean "this isn't
-/// a FerroCrypt file at all" — callers route to plaintext encrypt.
+/// Returns `Ok(None)` if the path is a directory or the file does not open with
+/// the 4-byte FerroCrypt magic, an empty file or one shorter than the magic
+/// included. These cases mean "this isn't a FerroCrypt file at all" — callers
+/// route to plaintext encrypt. [`Decryptor::open`] refuses a file without the
+/// magic: with [`FormatDefect::Truncated`](crate::FormatDefect::Truncated) when
+/// it is shorter than the 12-byte `.fcr` prefix, and with
+/// [`FormatDefect::BadMagic`](crate::FormatDefect::BadMagic) otherwise. It
+/// refuses a directory with [`CryptoError::InvalidInput`].
 ///
 /// Returns `Ok(Some(UnauthenticatedRecipientMode))` when the prefix matches
 /// and the header parses and classifies cleanly. The mode is derived from
@@ -1258,16 +1271,20 @@ pub fn generate_key_pair(
 /// [`UnauthenticatedRecipientMode::PublicKey`].
 ///
 /// Returns [`CryptoError::InvalidFormat`] when the magic matches but the
-/// prefix or header is malformed (bad version / kind / flags, oversized
-/// `header_len`, malformed recipient entries, etc.). The probe therefore
-/// enforces the same structural invariants the decrypt path would, so
-/// corrupt or attacker-modified files surface their specific diagnostic
-/// at probe time.
+/// prefix or header is malformed (wrong kind, reserved version byte or flags,
+/// oversized `header_len`, malformed recipient entries, etc.), and
+/// [`CryptoError::UnsupportedVersion`] for an outer-container version this
+/// release does not read. The probe therefore enforces the same structural
+/// invariants the decrypt path would, so corrupt or attacker-modified files
+/// surface their specific diagnostic at probe time.
 ///
 /// Returns typed recipient-classification errors when the recipient list is
-/// structurally valid but cannot be classified: unknown critical recipients,
-/// illegal passphrase mixing, no supported native recipient, or a passphrase
-/// recipient whose stored Argon2id parameters are out of range.
+/// structurally valid but cannot be classified:
+/// [`CryptoError::UnknownCriticalRecipient`] for an unknown critical
+/// recipient, [`CryptoError::IncompatibleRecipients`] for an illegal mix,
+/// [`CryptoError::NoSupportedRecipient`] when no recipient is of a supported
+/// type, and [`CryptoError::InvalidKdfParams`] for a passphrase recipient
+/// whose stored Argon2id parameters are out of range.
 ///
 /// # Errors
 ///
@@ -1276,10 +1293,14 @@ pub fn generate_key_pair(
 /// [`CryptoError::InvalidInput`] if the path is not a regular file (for
 /// example a FIFO or device node) — such inputs are refused without
 /// blocking. Returns [`CryptoError::InvalidFormat`] when the magic matches
-/// but the prefix, header, recipient entries, or recipient mixing policy are
-/// malformed or unsupported, and [`CryptoError::InvalidKdfParams`] when a
-/// passphrase recipient's stored Argon2id parameters are outside the bounds
-/// `FORMAT.md` §2.2 permits. Returns cap-exceeded variants when the declared
+/// but the prefix, header, or recipient entries are malformed,
+/// [`CryptoError::UnsupportedVersion`] for an outer-container version this
+/// release does not read, [`CryptoError::UnknownCriticalRecipient`],
+/// [`CryptoError::IncompatibleRecipients`], or
+/// [`CryptoError::NoSupportedRecipient`] when the recipient list cannot be
+/// classified, and [`CryptoError::InvalidKdfParams`] when a passphrase
+/// recipient's stored Argon2id parameters are outside the bounds `FORMAT.md`
+/// §2.2 permits. Returns cap-exceeded variants when the declared
 /// header shape, or the aggregate header-MAC work its recipient list implies,
 /// exceeds [`HeaderReadLimits::default`].
 pub fn probe_recipient_mode(
@@ -1306,21 +1327,12 @@ pub fn probe_recipient_mode_with_limits(
     file_path: impl AsRef<Path>,
     limits: HeaderReadLimits,
 ) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::Read;
     let path = file_path.as_ref();
 
-    // Handle directories before opening the path so all platforms return the
-    // same result. Unix may open a directory and fail later at `read()` with
-    // `IsADirectory`; Windows refuses the open up front and reports access
-    // denied, which is indistinguishable from a real permission error here.
-    if path.is_dir() {
+    let Some(mut file) = open_header_input(path)? else {
         return Ok(None);
-    }
-
-    // `open_input_file` refuses FIFOs, sockets, and device nodes
-    // without blocking — `File::open` on an attacker-placed FIFO would
-    // otherwise block the probe inside `open(2)` indefinitely.
-    let mut file = paths::open_input_file(path)?;
+    };
 
     // Peek the 4-byte magic. Anything that doesn't claim to be a
     // FerroCrypt file (empty, too short, wrong magic) routes to
@@ -1334,11 +1346,6 @@ pub fn probe_recipient_mode_with_limits(
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            // Defensive: on Unix, a TOCTOU race could swap the pre-checked
-            // path for a directory between `is_dir()` and `File::open()`.
-            // Keep the runtime handler so the race is still classified
-            // correctly instead of surfacing as a generic I/O error.
-            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => return Ok(None),
             Err(e) => return Err(CryptoError::Io(e)),
         }
     }
@@ -1346,19 +1353,40 @@ pub fn probe_recipient_mode_with_limits(
         return Ok(None);
     }
 
-    // Magic matched. Rewind the same handle and run the structural
-    // reader against the full prefix + header. Using `seek` instead
-    // of dropping and re-opening avoids both an extra syscall and a
-    // TOCTOU window where the path could be swapped between checks.
-    file.seek(SeekFrom::Start(0))?;
-    let parsed = container::read_encrypted_header(&mut file, limits)?;
+    // Magic matched. Run the structural reader on the same handle, which
+    // `from_file` rewinds: re-opening the path would leave a window for it to
+    // be swapped between the checks. Structural classification and resource
+    // policy only — the same preflight the decrypt path runs, so this probe
+    // cannot report a file the reader would then refuse under these limits.
+    // No header MAC and no recipient unwrap happen here.
+    let session = protocol::DecryptSession::from_file(file, limits)?;
+    Ok(Some(session.mode()))
+}
 
-    // Structural classification and resource policy only — the same
-    // preflight the decrypt path runs, so this probe cannot report a
-    // file the reader would then refuse under these limits. No header
-    // MAC and no recipient unwrap happen here.
-    let mode = protocol::classify_recipients_within_limits(&parsed, limits)?;
-    Ok(Some(mode))
+/// Opens `path` for a header read, or returns `None` when it names a
+/// directory, so the probe and [`Decryptor::open`] treat directories alike on
+/// every platform. Where a directory opens, as on Unix, the opened handle
+/// decides, which leaves no window for the path to change. Where the open
+/// refuses a directory with a permission error, as on Windows, a look at the
+/// path tells that error apart from a real one.
+///
+/// [`paths::open_input_file`] refuses FIFOs, sockets, and device nodes
+/// without blocking, so an attacker-placed FIFO cannot hold the caller inside
+/// `open(2)`.
+fn open_header_input(path: &Path) -> Result<Option<std::fs::File>, CryptoError> {
+    let file = match paths::open_input_file(path) {
+        Ok(file) => file,
+        Err(CryptoError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied && path.is_dir() =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if file.metadata().map_err(CryptoError::Io)?.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some(file))
 }
 
 // ─── Filename + key-file helpers ────────────────────────────────────────────
@@ -1387,7 +1415,8 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
 /// A file that starts with `fcr1`, the start of every recipient string, is
-/// refused first, as a `public.key`, with [`FormatDefect::WrongKeyFileType`],
+/// refused first, as a `public.key`, with
+/// [`FormatDefect::WrongKeyFileType`](crate::FormatDefect::WrongKeyFileType),
 /// even when it is shorter than the fixed header. The cleartext structure is
 /// then checked in this order: the size of the 90-byte fixed header, magic
 /// bytes, key-file kind, version, flags, length fields, KDF parameters, total
@@ -1422,14 +1451,15 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// Validates that a file is a well-formed FerroCrypt `public.key`
 /// text file.
 ///
-/// Checks the canonical `fcr1…` recipient string grammar, including
-/// Bech32 checksum, HRP, typed payload lengths, type name, key-material
-/// length, and internal SHA3-256 checksum. Does **not** require a
-/// passphrase. If the caller accidentally points this at a binary
-/// `private.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
-/// UTF-8 decode error, unless the file is longer than 20,001 bytes, the most
-/// a `public.key` can hold: `FORMAT.md` §7.1 checks the size first, so such
-/// a file is reported as [`FormatDefect::MalformedPublicKey`].
+/// Checks the canonical `fcr1…` recipient string grammar, including Bech32
+/// checksum, HRP, typed payload lengths, type name, key-material length, and
+/// internal SHA3-256 checksum. Does **not** require a passphrase. If the caller
+/// accidentally points this at a binary `private.key`,
+/// [`FormatDefect::WrongKeyFileType`](crate::FormatDefect::WrongKeyFileType) is
+/// returned instead of a UTF-8 decode error, unless the file is longer than
+/// 20,001 bytes, the most a `public.key` can hold: `FORMAT.md` §7.1 checks the
+/// size first, so such a file is reported as
+/// [`FormatDefect::MalformedPublicKey`](crate::FormatDefect::MalformedPublicKey).
 ///
 /// Companion to [`validate_private_key_file`]. Applies no resource caps
 /// of its own: the verdict follows what `FORMAT.md` §7 allows, not what

@@ -35,7 +35,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrocrypt_test_support::wire_manifest::{
-    DEFAULT_LIMIT_PROFILE_ID, SMALL_ARTIFACT_LIMIT_PROFILE_ID, corpus_files, field_violation,
+    self, DEFAULT_LIMIT_PROFILE_ID, SMALL_ARTIFACT_LIMIT_PROFILE_ID, corpus_files, field_violation,
     is_corpus_reference, is_manifest_id, is_structural_corpus_file, read_committed, read_table,
     read_table_with_columns, sha3_hex, table_columns,
 };
@@ -116,13 +116,30 @@ const SOURCE_DIR_MODE: u16 = 0o755;
 /// including the one-byte file inside the mutation base.
 const SOURCE_FILE_NAME: &str = "p";
 
-/// Grammar-valid recipient type name this build does not implement. Plugin
-/// namespaced per `FORMAT.md` §3.3.1, so a future native type cannot claim it.
+/// The capability in the `FORMAT.md` §12.2 type domain `domain` that a reader
+/// implementing `type_name` declares, or none for a test type name (§3.3.1): no
+/// reader implements one, so an outcome that rests only on it being unknown
+/// holds for every reader.
+fn type_capability(domain: &str, type_name: &str) -> Option<String> {
+    (!wire_manifest::is_test_type_name(type_name)).then(|| format!("{domain}:{type_name}"))
+}
+
+/// [`type_capability`] for a recipient type.
+fn recipient_type_capability(type_name: &str) -> Option<String> {
+    type_capability("recipient_type", type_name)
+}
+
+/// [`type_capability`] for a key type.
+fn key_type_capability(type_name: &str) -> Option<String> {
+    type_capability("key_type", type_name)
+}
+
+/// A test recipient type name (`FORMAT.md` §3.3.1), so no reader implements
+/// it and every case built on it is invariant.
 const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
 
-/// Grammar-valid key type name this build does not implement, plugin
-/// namespaced like [`UNKNOWN_RECIPIENT_TYPE`]. The corpus gives it to key
-/// files that no reader here can open.
+/// A test key type name (`FORMAT.md` §3.3.1), like [`UNKNOWN_RECIPIENT_TYPE`].
+/// The corpus gives it to key files that no reader can open.
 const UNSUPPORTED_KEY_TYPE: &str = "test/future-kem";
 
 /// The shortest type name the §3.3 grammar allows: a single character, so
@@ -176,22 +193,28 @@ fn break_magic(bytes: &mut [u8]) {
     bytes[0] ^= 0xFF;
 }
 
-/// The critical tag the extension-region cases carry, in every namespace. No
-/// reader here implements it, so an artifact that carries it is refused once
-/// its region is authenticated.
-const UNKNOWN_CRITICAL_TAG: u16 = 0x8001;
+/// The critical tag the extension-region cases carry, in every namespace: the
+/// test tag `FORMAT.md` §6 sets aside, which no implementation implements, so
+/// an artifact that carries it is refused once its region is authenticated,
+/// by every reader.
+const UNKNOWN_CRITICAL_TAG: u16 = wire_manifest::CRITICAL_TEST_TAG;
 
-/// A second critical tag no reader here implements, for the cases that put two
-/// critical tags in one region.
+/// A second critical tag, for the cases that put two critical tags in one
+/// region. Each such case is decided by a structural rule, which `FORMAT.md`
+/// §6 applies before a reader interprets any tag it implements, so whether a
+/// reader implements this tag does not matter.
 const SECOND_UNKNOWN_CRITICAL_TAG: u16 = 0x8002;
 
-/// The ignorable tag the extension-region cases carry, in every namespace. No
-/// reader here implements it, so a reader authenticates its entry and skips it
-/// (`FORMAT.md` §6). Changing it changes every artifact that carries it.
-const UNKNOWN_IGNORABLE_TAG: u16 = 0x0001;
+/// The ignorable tag the extension-region cases carry, in every namespace: the
+/// test tag `FORMAT.md` §6 sets aside, which no implementation implements, so
+/// every reader authenticates its entry and skips it. Changing it changes every
+/// artifact that carries it.
+const UNKNOWN_IGNORABLE_TAG: u16 = wire_manifest::IGNORABLE_TEST_TAG;
 
-/// A second ignorable tag no reader here implements, for the cases that put
-/// two tags in one region.
+/// A second ignorable tag, for the cases that put two tags in one region. Each
+/// such case is decided by a structural rule, which `FORMAT.md` §6 applies
+/// before a reader interprets any tag it implements, so whether a reader
+/// implements this tag does not matter.
 const SECOND_UNKNOWN_IGNORABLE_TAG: u16 = 0x0002;
 
 /// The reserved tag at the start of the ignorable half of the tag space
@@ -206,13 +229,6 @@ const CRITICAL_HALF_RESERVED_TAG: u16 = 0x8000;
 /// The byte the FCA extension-region cases fill their TLV values with. Their
 /// committed bytes were generated with it, so it stays apart from [`FILLER`].
 const FCA_EXT_FILLER: u8 = 0x41;
-
-/// The capability a reader that implements [`UNKNOWN_CRITICAL_TAG`] in the TLV
-/// namespace `domain` declares, so it does not assert the cases whose outcome
-/// depends on that tag (`FORMAT.md` §12.2).
-fn critical_tag_capability(domain: &str) -> String {
-    format!("{domain}:0x{UNKNOWN_CRITICAL_TAG:04X}")
-}
 
 /// A TLV region whose first entry carries [`UNKNOWN_CRITICAL_TAG`] and whose
 /// second declares a value running past the region's end. `FORMAT.md` §6
@@ -2484,10 +2500,10 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 /// The version byte, whose outcomes differ in class, counts as one check per
 /// class. Only a pair with a check that a capability changes rests on a
 /// capability-relative case, so a reader that declares a capability loses only
-/// such pairs. A recipient type the reader implements changes three checks:
-/// whether an entry of that type is unknown and critical, whether the file
-/// holds a supported recipient, and how many supported recipients the
-/// header-MAC work cap counts.
+/// such pairs. The unknown recipient type and the extension tags these cases
+/// use are test values (`FORMAT.md` §3.3.1, §6), which no reader implements,
+/// so the only capability that touches them is a newer outer-container
+/// version.
 fn write_prefix_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
     use crate::format::{HEADER_LEN_MAX, KIND_PRIVATE_KEY, PREFIX_SIZE};
 
@@ -3130,7 +3146,8 @@ fn set_critical_flag(entry: &mut RecipientEntry) {
     entry.recipient_flags = crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
 }
 
-/// A grammar-valid recipient entry for a type this build does not implement.
+/// A grammar-valid recipient entry of the test type [`UNKNOWN_RECIPIENT_TYPE`],
+/// which no reader implements.
 fn unknown_entry(critical: bool) -> RecipientEntry {
     RecipientEntry {
         type_name: UNKNOWN_RECIPIENT_TYPE.to_string(),
@@ -3231,11 +3248,13 @@ fn write_recipient_framing_cases(
         b"",
     );
 
-    // An unknown critical recipient is capability-relative: an implementation
-    // of that type stops rejecting it. The second entry sits on the lower
-    // bounds of §3.3, a one-byte type name and an empty body. The name is
-    // native but unassigned, which a reader must still take as well formed
-    // (§3.3.1), so only the critical flag refuses the file.
+    // An unknown critical recipient is refused. The first case names a test
+    // type, which no reader implements, so it is invariant. The second entry
+    // sits on the lower bounds of §3.3, a one-byte type name and an empty body.
+    // The name is native but unassigned, which a reader must still take as
+    // well formed (§3.3.1), so only the critical flag refuses the file; an
+    // implementation of that type stops refusing it, so that case is
+    // capability-relative.
     drop(scope);
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let shortest = RecipientEntry {
@@ -3257,14 +3276,14 @@ fn write_recipient_framing_cases(
     ] {
         let _scope = case_scope(case_id);
         let file_key = FileKey::generate().expect("file key");
-        let capability = format!("recipient_type:{}", critical.type_name);
+        let capability = recipient_type_capability(&critical.type_name);
         let entries = [critical, x25519_entry(&keys.public_a, &file_key)];
         let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
         commit_crafted_reject(
             corpus,
             case_id,
             "private-key-a",
-            Some(&capability),
+            capability.as_deref(),
             condition_id,
             "unknown_critical_recipient",
             built,
@@ -3297,7 +3316,7 @@ fn write_recipient_framing_cases(
     let scope = case_scope("recipient-type-name-at-max");
     let file_key = FileKey::generate().expect("file key");
     let mut longest = unknown_entry(false);
-    longest.type_name = type_name_on_maximum("test/", "u");
+    longest.type_name = type_name_on_maximum(wire_manifest::TEST_TYPE_NAME_PREFIX, "u");
     let entries = [longest, x25519_entry(&keys.public_a, &file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     accept_fcr_case(
@@ -3568,9 +3587,10 @@ fn write_recipient_check_order_cases(
 
     // The rest need entries the base does not have, so they start from files
     // built here. A reader that implements the unknown type stops refusing the
-    // critical entry, so a case whose class comes from that entry is
-    // capability-relative.
-    let unknown_type = format!("recipient_type:{UNKNOWN_RECIPIENT_TYPE}");
+    // critical entry, so a case whose class comes from that entry depends on
+    // the type; the type is a test type, which no reader implements, so the
+    // cases are invariant.
+    let unknown_type = recipient_type_capability(UNKNOWN_RECIPIENT_TYPE);
     let break_second_type_name = |b: &mut Vec<u8>| {
         let second_type_name = first_entry_end(b) + ENTRY_HEADER_SIZE;
         b[second_type_name] = UNGRAMMATICAL_TYPE_NAME_BYTE;
@@ -3580,7 +3600,7 @@ fn write_recipient_check_order_cases(
         sources,
         "recipient-order-unknown-critical-before-none-supported",
         "passphrase-main",
-        Some(&unknown_type),
+        unknown_type.as_deref(),
         (
             "critical_recipient_type_unsupported_and_no_supported_recipient",
             "unknown_critical_recipient",
@@ -3636,7 +3656,7 @@ fn write_recipient_check_order_cases(
         sources,
         "recipient-order-unknown-critical-before-native-length-x25519-first",
         "private-key-a",
-        Some(&unknown_type),
+        unknown_type.as_deref(),
         (
             "critical_recipient_type_unsupported_and_x25519_body_short_x25519_first",
             "unknown_critical_recipient",
@@ -3665,7 +3685,7 @@ fn write_recipient_check_order_cases(
         sources,
         "recipient-order-unknown-critical-before-native-length-unknown-first",
         "private-key-a",
-        Some(&unknown_type),
+        unknown_type.as_deref(),
         (
             "critical_recipient_type_unsupported_and_x25519_body_short_unknown_first",
             "unknown_critical_recipient",
@@ -3686,7 +3706,7 @@ fn write_recipient_check_order_cases(
         sources,
         "recipient-order-unknown-critical-before-native-flags-x25519-first",
         "private-key-a",
-        Some(&unknown_type),
+        unknown_type.as_deref(),
         (
             "critical_recipient_type_unsupported_and_x25519_critical_flag_set_x25519_first",
             "unknown_critical_recipient",
@@ -3713,7 +3733,7 @@ fn write_recipient_check_order_cases(
         sources,
         "recipient-order-unknown-critical-before-native-flags-unknown-first",
         "private-key-a",
-        Some(&unknown_type),
+        unknown_type.as_deref(),
         (
             "critical_recipient_type_unsupported_and_x25519_critical_flag_set_unknown_first",
             "unknown_critical_recipient",
@@ -3955,6 +3975,21 @@ const SMALL_ORDER_EPHEMERAL: [u8; x25519::PUBLIC_KEY_SIZE] = [
     0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
     0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
 ];
+
+/// The library's copies of the `FORMAT.md` §3.3.1 and §6 test values match the
+/// ones the corpus is generated and checked with, so the corpus marks invariant
+/// exactly what the library treats as never implemented.
+#[test]
+fn test_values_match_the_library() {
+    assert_eq!(
+        crate::crypto::tlv::CRITICAL_TEST_TAG,
+        wire_manifest::CRITICAL_TEST_TAG
+    );
+    assert_eq!(
+        crate::recipient::name::TEST_TYPE_NAME_PREFIX,
+        wire_manifest::TEST_TYPE_NAME_PREFIX
+    );
+}
 
 /// `FORMAT.md` §12.3 requires crate-internal replay to prove the canonical
 /// small-order vector reaches the during-X25519 all-zero-shared-secret check
@@ -4229,8 +4264,8 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     );
     drop(scope);
 
-    // An unknown critical tag is capability-relative: implementing the tag
-    // stops the rejection (`FORMAT.md` §12.2).
+    // An unknown critical tag is refused. It is the §6 test tag, which no
+    // reader implements, so the case is invariant.
     let scope = case_scope("tlv-unknown-critical");
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
@@ -4245,7 +4280,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
         corpus,
         "tlv-unknown-critical",
         "passphrase-main",
-        Some(&critical_tag_capability("outer_tlv")),
+        None,
         "tlv_critical_tag_unsupported",
         "unknown_critical_tlv",
         built,
@@ -4462,16 +4497,19 @@ fn public_key_row(corpus: &mut Corpus, case_id: &str, bytes: &[u8]) -> CaseRow {
 }
 
 /// Commits `row` as the case of a key file naming `type_name`, a type no
-/// reader here implements. The case is capability-relative (`FORMAT.md`
-/// §12.2): an implementation of that type does not assert its outcome.
+/// reader here implements. A test type name (`FORMAT.md` §3.3.1) is never
+/// implemented, so its case is invariant; any other type makes the case
+/// capability-relative (§12.2), since an implementation of that type does not
+/// assert its outcome.
 fn unsupported_key_type_case(
     corpus: &mut Corpus,
     row: CaseRow,
     type_name: &str,
     condition_id: &str,
 ) {
+    let capability = key_type_capability(type_name);
     let row = row
-        .capability(&format!("key_type:{type_name}"))
+        .capability_if_any(capability.as_deref())
         .reject(condition_id, "unsupported_key_type");
     corpus.push_case(row);
 }
@@ -4728,7 +4766,9 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys, encrypted_file
 /// encoding is malformed for every implementation, while an encoding from a
 /// suite this release does not define is capability-relative — an
 /// implementation that adds the suite legitimately accepts it. A key type
-/// this release does not implement is capability-relative in the same way.
+/// this release does not implement is capability-relative in the same way,
+/// unless it is a test type name (`FORMAT.md` §3.3.1), which no reader
+/// implements.
 fn write_public_key_version_cases(corpus: &mut Corpus) {
     use crate::key::public::encode_recipient_string_with_version;
 
@@ -4756,9 +4796,9 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
     );
     corpus.push_case(row);
 
-    // A well-formed string for a recipient type this release does not
-    // implement. The grammar, checksum, and suite gates all pass, so it is an
-    // unsupported type rather than a malformed key.
+    // A well-formed string for a test type, which no reader implements. The
+    // grammar, checksum, and suite gates all pass, so it is an unsupported type
+    // rather than a malformed key.
     let unsupported = encode_recipient_string_with_version(
         crate::key::public::PUBLIC_KEY_VERSION,
         UNSUPPORTED_KEY_TYPE,
@@ -4911,7 +4951,7 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
     );
 
     // The type-name length on its maximum: the key is well formed, so it is
-    // refused only because no reader here implements its type.
+    // refused only because its type is a test type, which no reader implements.
     let at_max = encode_recipient_string_with_version(PUBLIC_KEY_VERSION, &longest, &material)
         .expect("encode a type name on the maximum");
     let row = public_key_row(
@@ -4950,12 +4990,12 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
 
     // The key-material length on its maximum, in the longest well-formed
     // string, and one past it, replayed under a recipient-string cap that
-    // admits their length. The first is refused only because no reader here
-    // implements its type; a reader that cannot decode a string of that
-    // length reports `malformed_public_key` instead. Past the maximum the type
-    // name is malformed too, so a reader that checks the name before the
-    // length fields, against §7, reports `malformed_type_name` instead of
-    // `malformed_public_key`.
+    // admits their length. The first is refused only because its type is a
+    // test type, which no reader implements; a reader that cannot decode a
+    // string of that length reports `malformed_public_key` instead. Past the
+    // maximum the type name is malformed too, so a reader that checks the name
+    // before the length fields, against §7, reports `malformed_type_name`
+    // instead of `malformed_public_key`.
     let material_past_max = encode_unchecked(
         PUBLIC_KEY_VERSION,
         &ungrammatical_type_name(),
@@ -5476,7 +5516,6 @@ fn write_private_key_ext_and_pair_cases(
         &critical,
         "private-key-a",
     )
-    .capability(&critical_tag_capability("private_key_tlv"))
     .reject(
         "private_key_ext_unknown_critical_tag",
         "unknown_critical_tlv",
@@ -5838,7 +5877,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         private_key_case(corpus, case_id, &bytes, condition, class);
     }
 
-    // A well-formed key of a type this release does not implement.
+    // A well-formed key of a test type, which no reader implements.
     let unsupported = with_private_key_type(&canonical, UNSUPPORTED_KEY_TYPE);
     let row = private_key_row(corpus, "private-key-unsupported-type", &unsupported);
     unsupported_key_type_case(
@@ -6627,12 +6666,11 @@ fn write_private_key_order_cases(
     );
     // The checks after authentication. The extension rules count as two checks,
     // one per class: a malformed region, which §6 checks first, and an unknown
-    // critical tag. A reader that implements the tag reads past it, so a case
-    // whose outcome depends on the tag is capability-relative. The type's own
-    // rules cannot be broken together with type support, so they have cases
-    // with both extension checks; their keys hold public material a byte short.
+    // critical tag. The tag is the §6 test tag, which no reader implements, so
+    // every case here is invariant. The type's own rules cannot be broken
+    // together with type support, so they have cases with both extension
+    // checks; their keys hold public material a byte short.
     let public_short = &opened.public[..x25519::PUBLIC_KEY_SIZE - 1];
-    let critical_tag = Some(critical_tag_capability("private_key_tlv"));
     let sealed_cases = [
         (
             "private-key-open-order-authentication-before-ext",
@@ -6640,7 +6678,6 @@ fn write_private_key_order_cases(
             opened.public.as_slice(),
             tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a-wrong-unlock",
-            None,
             "private_key_wrong_unlock_passphrase_and_ext_value_runs_past_region",
             "private_key_unlock_failed",
         ),
@@ -6650,7 +6687,6 @@ fn write_private_key_order_cases(
             opened.public.as_slice(),
             unknown_critical_tlv_region(),
             "private-key-a-wrong-unlock",
-            None,
             "private_key_wrong_unlock_passphrase_and_ext_unknown_critical_tag",
             "private_key_unlock_failed",
         ),
@@ -6660,7 +6696,6 @@ fn write_private_key_order_cases(
             opened.public.as_slice(),
             tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a",
-            None,
             "private_key_ext_value_runs_past_region_and_type_not_supported",
             "malformed_tlv",
         ),
@@ -6670,7 +6705,6 @@ fn write_private_key_order_cases(
             opened.public.as_slice(),
             unknown_critical_tlv_region(),
             "private-key-a",
-            critical_tag.clone(),
             "private_key_ext_unknown_critical_tag_and_type_not_supported",
             "unknown_critical_tlv",
         ),
@@ -6680,7 +6714,6 @@ fn write_private_key_order_cases(
             opened.public.as_slice(),
             critical_tag_then_malformed_entry(b"critical"),
             "private-key-a",
-            None,
             "private_key_ext_value_runs_past_region_after_unknown_critical_tag",
             "malformed_tlv",
         ),
@@ -6690,7 +6723,6 @@ fn write_private_key_order_cases(
             public_short,
             tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a",
-            None,
             "private_key_ext_value_runs_past_region_and_x25519_public_material_not_32_bytes",
             "malformed_tlv",
         ),
@@ -6700,21 +6732,12 @@ fn write_private_key_order_cases(
             public_short,
             unknown_critical_tlv_region(),
             "private-key-a",
-            critical_tag,
             "private_key_ext_unknown_critical_tag_and_x25519_public_material_not_32_bytes",
             "unknown_critical_tlv",
         ),
     ];
-    for (
-        case_id,
-        type_name,
-        public_material,
-        ext_bytes,
-        credential,
-        capability,
-        condition,
-        class,
-    ) in sealed_cases
+    for (case_id, type_name, public_material, ext_bytes, credential, condition, class) in
+        sealed_cases
     {
         let key = seal_private_key_for_case(
             case_id,
@@ -6723,9 +6746,7 @@ fn write_private_key_order_cases(
             public_material,
             &ext_bytes,
         );
-        let row = private_key_open_row(corpus, case_id, &key, credential)
-            .capability_if_any(capability.as_deref())
-            .reject(condition, class);
+        let row = private_key_open_row(corpus, case_id, &key, credential).reject(condition, class);
         corpus.push_case(row);
     }
 }
@@ -6861,7 +6882,7 @@ fn fca_case(
 
 /// Rejected FCA case whose outcome follows from the reader's feature set, so
 /// the row names the one capability that would stop the rejection
-/// (`FORMAT.md` §12.1).
+/// (`FORMAT.md` §12.2).
 fn fca_capability_case(
     corpus: &mut Corpus,
     case_id: &str,
@@ -7370,9 +7391,10 @@ fn write_fca_cases(corpus: &mut Corpus) {
 
     // Extension regions (`FORMAT.md` §9.3 / §9.5). Each rule is driven in both
     // namespaces, because the archive-level and per-entry regions carry
-    // separate tag spaces and are validated at different points of §9.11. An
-    // ignorable tag is authenticated and skipped, a critical one is
-    // capability-relative, and a truncated or reserved tag is invariant.
+    // separate tag spaces and are validated at different points of §9.11. The
+    // ignorable and critical tags are the §6 test tags, which no reader
+    // implements, so one is always skipped and the other always refused, and
+    // every case here is invariant.
     let entry_ext = |ext: &[u8]| {
         build_fca(
             &[FcaEntry::file("p.txt", b"fca payload").with_entry_ext(ext)],
@@ -7393,21 +7415,20 @@ fn write_fca_cases(corpus: &mut Corpus) {
         &entry_ext(&tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"entry")),
         Ok(b"fca payload".to_vec()),
     );
-    fca_capability_case(
+    fca_case(
         corpus,
         "fca-archive-ext-critical",
         &archive_ext(&tlv_bytes(UNKNOWN_CRITICAL_TAG, b"archive")),
-        &critical_tag_capability("fca_archive_tlv"),
-        "fca_archive_ext_unknown_critical_tag",
-        "unknown_critical_tlv",
+        Err((
+            "fca_archive_ext_unknown_critical_tag",
+            "unknown_critical_tlv",
+        )),
     );
-    fca_capability_case(
+    fca_case(
         corpus,
         "fca-entry-ext-critical",
         &entry_ext(&tlv_bytes(UNKNOWN_CRITICAL_TAG, b"entry")),
-        &critical_tag_capability("fca_entry_tlv"),
-        "fca_entry_ext_unknown_critical_tag",
-        "unknown_critical_tlv",
+        Err(("fca_entry_ext_unknown_critical_tag", "unknown_critical_tlv")),
     );
     // Three bytes where a TLV entry header needs six, so the region ends
     // inside the header of its only entry.

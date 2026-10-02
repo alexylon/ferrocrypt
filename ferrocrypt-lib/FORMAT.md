@@ -511,6 +511,14 @@ native names ending in `tag`, are reserved for future FerroCrypt-defined
 recipient types. Future FerroCrypt specifications MAY define additional native
 names or reserved prefixes.
 
+Plugin names that begin with `test/` are set aside as test type names. No
+specification defines a recipient or key type under them, and implementations
+MUST NOT implement one, so every reader treats such a type as unknown: §3.4
+decides what becomes of a recipient entry of that type, and §7 and §8 refuse a
+key file of that type as `unsupported_key_type` when no earlier check refuses
+it. The conformance corpus (§12.3) uses them for the unknown types its
+outcomes rest on.
+
 ### 3.4 Recipient flags
 
 `recipient_flags` is a `u16` bit field:
@@ -1043,8 +1051,15 @@ Rules after the relevant containing authentication step:
 7. Unknown critical tags MUST cause rejection.
 8. Reserved tags MUST be rejected.
 
+Tags `0x0001` and `0x8001` are set aside as test tags in every TLV namespace.
+No specification assigns them and implementations MUST NOT implement them, so
+every reader treats them as unknown: it skips `0x0001` under rule 6 and refuses
+`0x8001` under rule 7. The conformance corpus (§12.3) uses them for the unknown
+tags its outcomes rest on.
+
 A reader MUST check the whole region against rules 1 to 4 and 8, and against
-any value cap its containing format sets, before it applies rule 7. A region
+any value cap its containing format sets, before it applies rule 7 or
+interprets the value of any tag it implements. A region
 that breaks any of them is therefore `malformed_tlv` (§12.1) even when it also
 holds an unknown critical tag, whichever entry comes first.
 
@@ -2514,7 +2529,8 @@ reader is not required to understand a future incompatible version; the promise
 is one-way from later readers to earlier stable artifacts. A rejection caused
 only by an unknown feature is capability-relative: a later implementation may
 accept the same feature after implementing its specification, as defined in
-§12.2.
+§12.2. The test type names of §3.3.1 and the test tags of §6 are never
+implemented, so a rejection they cause is invariant.
 
 Artifacts produced by `0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`, or
 untagged development revisions such as `main` are outside the cross-release
@@ -2682,12 +2698,19 @@ FerroCrypt's stable English display strings use sentence case without terminal
 punctuation and state only what the error class proves. A newer-version class
 may say that newer FerroCrypt is needed. An unknown recipient or key type MUST
 NOT prescribe an upgrade because it may belong to an external implementation.
-An unknown critical TLV tag denotes a required feature from a later compatible
-FerroCrypt specification (§6), so it MUST use this exact form, substituting the
-tag as four uppercase hexadecimal digits:
+An unknown critical TLV tag other than the critical test tag of §6 denotes a
+required feature from a later compatible FerroCrypt specification, so it MUST
+use this exact form, substituting the tag as four uppercase hexadecimal digits:
 
 ```text
 Newer FerroCrypt is needed for file feature tag 0xNNNN
+```
+
+The critical test tag `0x8001` denotes no feature, so it MUST instead use this
+exact form:
+
+```text
+File uses test tag 0x8001, which no reader supports
 ```
 
 Unsupported encoding versions MUST use these exact forms, substituting the raw
@@ -2735,7 +2758,12 @@ X25519 shared secrets as valid.
 An outcome caused only by the implementation's current feature set is
 capability-relative. Examples include an unsupported future stored version, an
 unknown critical recipient or TLV, and a grammar-valid but unsupported key
-type.
+type. Accepted outcomes are included: a file that opens only because a reader
+skips an unknown non-critical recipient type or an unknown ignorable tag is
+capability-relative too. The test type names of §3.3.1 and the test tags of §6
+are the exception: no implementation implements them, so an outcome that rests
+only on one of them being unknown is invariant, and no capability ID names
+one.
 
 The frozen corpus identifies such features with these capability-ID forms:
 
@@ -2756,8 +2784,9 @@ In these forms, `NN` and `NNNN` denote exactly two and four uppercase
 hexadecimal digits, respectively. `<type_name>` is the exact grammar-valid type
 name from §3.3.
 
-The reserved `0x00` value in any stored version domain MUST NOT be represented
-as a capability ID. Reserved-zero cases are invariant.
+The reserved `0x00` value in any stored version domain and the reserved tags
+`0x0000` and `0x8000` of §6 MUST NOT be represented as capability IDs. Cases
+built on a reserved value are invariant.
 
 An invariant case MUST use `capability_id = -`. A capability-relative case MUST
 name exactly one relevant capability ID.

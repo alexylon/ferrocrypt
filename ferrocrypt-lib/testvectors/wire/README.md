@@ -77,7 +77,16 @@ exact conditions that share a class.
 
 A row with `expectation_scope = capability_relative` names one capability in
 `capability_id`. Assert its stored outcome only while your implementation does
-not support that capability (`FORMAT.md` §12.2).
+not support that capability (`FORMAT.md` §12.2). An outcome that rests on an
+unknown recipient or key type, or on an unknown extension tag, uses a test
+value wherever it can: a type name beginning with `test/`, or tag `0x0001` or
+`0x8001`. §3.3.1 and §6 set these aside as values no implementation
+implements, so every case built on them is invariant. The one-letter native
+type name `t`, which a type name at its minimum length needs, is not one, and
+its cases are capability-relative. A second tag that a case needs only for its
+structure, such as `0x0002` beside `0x0001`, cannot change the outcome,
+because §6 checks the structure of a region before it refuses an unknown
+critical tag or interprets the value of a tag it implements.
 
 **Every case is evaluated under committed limits.** Local resource caps are
 configuration rather than format, so a stored outcome can depend on them. Each
@@ -244,10 +253,10 @@ Together the cases fix the order of every two checks that report different
 classes and that one file can break together, with a step whose outcomes differ
 in class, such as the version, counted as one check per class. Only a pair with
 a check that a capability changes rests on a capability-relative case, so a
-reader that declares a capability loses only such pairs. A recipient type the
-reader implements changes three checks: whether an entry of that type is
-unknown and critical, whether the file holds a supported recipient, and how
-many supported recipients the header-MAC work cap counts. The header-MAC
+reader that declares a capability loses only such pairs. The unknown recipient
+type and the extension tags the order cases use are test values (`FORMAT.md`
+§3.3.1, §6), which no reader implements, so the only capabilities that touch
+the order cases are newer stored versions. The header-MAC
 work cap follows every check of `FORMAT.md` §3.7 steps 1 to 9 and comes before
 the private-key unlock and before any recipient is tried.
 `header-mac-work-order-mixing-before-cap` puts it after the mixing rules and so,

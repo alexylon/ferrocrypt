@@ -34,13 +34,16 @@ NONCE = re.compile(r"^[0-9a-f]{38}$")
 # A limit-profile value: a decimal integer with no leading zero.
 LIMIT = re.compile(r"^(0|[1-9][0-9]*)$")
 U64_MAX = 2**64 - 1
-# Section 12.2 reserves 0x00 in every stored version domain, so no capability
-# names it.
+# Section 12.2 reserves 0x00 in every stored version domain, section 6
+# reserves tags 0x0000 and 0x8000, and no implementation implements the test
+# tags of section 6 or the test type names of section 3.3.1, so no capability
+# names any of them.
 CAPABILITY = re.compile(
     r"^(outer_version|fca_version|public_key_version|private_key_version)"
     r":0x(?!00)[0-9A-F]{2}$"
-    r"|^(outer_tlv|private_key_tlv|fca_archive_tlv|fca_entry_tlv):0x[0-9A-F]{4}$"
-    r"|^(recipient_type|key_type):.+$"
+    r"|^(outer_tlv|private_key_tlv|fca_archive_tlv|fca_entry_tlv)"
+    r":0x(?!0000$|8000$|0001$|8001$)[0-9A-F]{4}$"
+    r"|^(recipient_type|key_type):(?!test/).+$"
 )
 
 # The seven manifest tables and the exact columns each declares, in order.

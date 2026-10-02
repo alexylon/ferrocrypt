@@ -1037,7 +1037,7 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
     // malformed and unknown-critical rejections.
     let archive_ignorable = tlv_bytes(0x0042, b"archive-metadata");
     let entry_ignorable = tlv_bytes(0x0042, b"entry-metadata");
-    let critical = tlv_bytes(0x8001, b"required");
+    let critical = tlv_bytes(crate::crypto::tlv::CRITICAL_TEST_TAG, b"required");
     let mut malformed = tlv_bytes(0x0001, b"");
     malformed.pop();
 
@@ -1064,7 +1064,7 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
         "cases/fca-archive-ext-critical.fcr",
         &right,
         "InvalidFormat(UnknownCriticalTag)",
-        "Newer FerroCrypt is needed for file feature tag 0x8001",
+        "File uses test tag 0x8001, which no reader supports",
     ));
     rows.push(Case::ok("cases/fca-entry-ext-ignorable.fcr", &right));
     rows.push(Case::err(
@@ -1077,7 +1077,7 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
         "cases/fca-entry-ext-critical.fcr",
         &right,
         "InvalidFormat(UnknownCriticalTag)",
-        "Newer FerroCrypt is needed for file feature tag 0x8001",
+        "File uses test tag 0x8001, which no reader supports",
     ));
 
     rows
@@ -1227,6 +1227,11 @@ fn write_manifest(suite: &Path, rows: &[Case]) {
     fs::write(suite.join("manifest.tsv"), out).expect("write manifest.tsv");
 }
 
+/// A critical tag no specification assigns yet (`FORMAT.md` §6). Unlike the
+/// critical test tag, a later specification could assign it, so its refusal
+/// advises a newer FerroCrypt.
+const UNASSIGNED_CRITICAL_TAG: u16 = 0x8002;
+
 /// Fixed seed for the deterministic RNG the generator runs under, so
 /// regenerating the corpus produces byte-identical output every time and a
 /// re-run is a clean (empty) diff. Changing it re-randomizes every fixture.
@@ -1238,7 +1243,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 14;
+const SUITE_VERSION: u32 = 15;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1576,7 +1581,12 @@ fn regenerate_suite_vectors_inner() {
         "tlv-unknown-ignorable.fcr",
         tlv_bytes(0x0042, b"suite-metadata"),
     );
-    tlv_fcr("tlv-unknown-critical.fcr", tlv_bytes(0x8001, &[0xAA; 4]));
+    // A critical tag a later specification could assign, so its refusal
+    // advises a newer FerroCrypt; the FCA cases carry the test tag instead.
+    tlv_fcr(
+        "tlv-unknown-critical.fcr",
+        tlv_bytes(UNASSIGNED_CRITICAL_TAG, &[0xAA; 4]),
+    );
 
     for (name, class, message) in [
         ("tlv-bad-order.fcr", "InvalidFormat(MalformedTlv)", None),
@@ -1585,7 +1595,7 @@ fn regenerate_suite_vectors_inner() {
         (
             "tlv-unknown-critical.fcr",
             "InvalidFormat(UnknownCriticalTag)",
-            Some("Newer FerroCrypt is needed for file feature tag 0x8001"),
+            Some("Newer FerroCrypt is needed for file feature tag 0x8002"),
         ),
     ] {
         rows.push(Case::err(

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::UnauthenticatedRecipientMode;
+use crate::crypto::tlv::CRITICAL_TEST_TAG;
 use crate::recipient::argon2id;
 use crate::recipient::policy::MixingPolicy;
 
@@ -985,7 +986,9 @@ pub enum FormatDefect {
     MalformedTlv,
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
     /// recognised by this release. Per `FORMAT.md` §6, unknown
-    /// critical TLV tags must cause file rejection.
+    /// critical TLV tags must cause file rejection. The message advises a
+    /// newer FerroCrypt, except for the critical test tag `0x8001`, which §6
+    /// sets aside and no release will implement.
     UnknownCriticalTag {
         /// Unknown critical TLV tag value.
         tag: u16,
@@ -1094,6 +1097,12 @@ impl std::fmt::Display for FormatDefect {
                 write!(f, "Extension region is too large ({len} bytes)")
             }
             Self::MalformedTlv => f.write_str("Extension region is malformed"),
+            Self::UnknownCriticalTag { tag } if *tag == CRITICAL_TEST_TAG => {
+                write!(
+                    f,
+                    "File uses test tag 0x{tag:04X}, which no reader supports"
+                )
+            }
             Self::UnknownCriticalTag { tag } => {
                 write!(
                     f,
@@ -1575,8 +1584,15 @@ mod tests {
             "Extension region is malformed"
         );
         assert_eq!(
-            FormatDefect::UnknownCriticalTag { tag: 0x8001 }.to_string(),
-            "Newer FerroCrypt is needed for file feature tag 0x8001"
+            FormatDefect::UnknownCriticalTag { tag: 0x8002 }.to_string(),
+            "Newer FerroCrypt is needed for file feature tag 0x8002"
+        );
+        assert_eq!(
+            FormatDefect::UnknownCriticalTag {
+                tag: CRITICAL_TEST_TAG
+            }
+            .to_string(),
+            "File uses test tag 0x8001, which no reader supports"
         );
         assert_eq!(
             FormatDefect::NotAKeyFile.to_string(),
@@ -2365,6 +2381,12 @@ mod tests {
             (
                 "UnknownCriticalTag",
                 FormatDefect::UnknownCriticalTag { tag: u16::MAX },
+            ),
+            (
+                "UnknownCriticalTag(test tag)",
+                FormatDefect::UnknownCriticalTag {
+                    tag: CRITICAL_TEST_TAG,
+                },
             ),
             ("NotAKeyFile", FormatDefect::NotAKeyFile),
             ("WrongKeyFileType", FormatDefect::WrongKeyFileType),

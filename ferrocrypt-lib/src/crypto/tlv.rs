@@ -65,6 +65,11 @@ pub(crate) fn classify_tlv_tag(tag: u16) -> Result<TlvClass, CryptoError> {
 /// TLV entry header size: `tag(u16) || len(u32) = 6` bytes.
 pub(crate) const ENTRY_HEADER_SIZE: usize = 6;
 
+/// The critical test tag `FORMAT.md` §6 sets aside in every TLV namespace. No
+/// specification assigns it and no implementation may implement it, so a
+/// region that carries it is always refused.
+pub(crate) const CRITICAL_TEST_TAG: u16 = 0x8001;
+
 /// Scans a TLV region into [`RawTlv`] entries with full canonicality
 /// checks: each entry header fits, declared `len` fits in the region
 /// and `<= max_value_len`, tags strictly ascending (rejects duplicates

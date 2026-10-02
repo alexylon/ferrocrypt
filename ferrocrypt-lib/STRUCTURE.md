@@ -378,6 +378,9 @@ Untrusted text embedded in an error message — archive entry paths, source-tree
 
 `error.rs` also owns the display policy. Complete library-owned diagnostics use
 sentence case, begin with a capital letter, and have no terminal punctuation.
+An unknown critical TLV tag advises a newer FerroCrypt, as `FORMAT.md` §12.1
+requires, except the critical test tag of §6 (`crypto::tlv::CRITICAL_TEST_TAG`),
+which no release will implement and whose exact message says so.
 Static reason and marker fragments begin lowercase unless their first word is
 an acronym or proper name, and likewise have no terminal punctuation; their
 owning prefix supplies the capitalized start of the complete message. Stable
@@ -554,6 +557,7 @@ The module exposes:
 - `reject_unknown_critical(tlvs) -> Result<()>` — the current policy wrapper. Rejects any `TlvClass::Critical` entry as `UnknownCriticalTag` because the current specification defines no known critical tags in any region. A later specification that defines known criticals will iterate the scanned TLVs against a registry instead.
 - `validate_no_known_critical(bytes, max_region_len, max_value_len) -> Result<()>` — the single-call helper. Combines `scan_tlv_region` and `reject_unknown_critical` for callers that don't need the parsed entries. Used by every current caller (FCR header, `private.key`, FCA `archive_ext`, FCA `entry_ext`).
 - `classify_tlv_tag(tag) -> Result<TlvClass>` — pure tag classification, rejects the two reserved values.
+- `CRITICAL_TEST_TAG` — the critical test tag `FORMAT.md` §6 sets aside, which no implementation may implement. `error.rs` reads it to word the refusal of that tag without advising an upgrade.
 - `validate_tlv(ext_bytes)` — public convenience function. Calls `validate_no_known_critical` with `EXT_LEN_MAX` for both region and value caps. Used by the `.fcr` header only; every other region has its own wrapper carrying the caps its containing format defines (`key::private::validate_private_key_ext_tlv`, `archive::format::validate_archive_ext_tlv`, `archive::format::validate_entry_ext_tlv`).
 
 Rules:
@@ -603,7 +607,7 @@ Rules:
 
 - `validate_type_name_grammar(name)` — the §3.3 byte-level grammar (1..=255 bytes, lowercase ASCII, allowed character set, no leading/trailing punctuation, no `..`/`//`). All in-tree wire-format readers and writers (`recipient/entry.rs`, `key/public.rs`, `key/private.rs`) call this and only this. The grammar deliberately accepts unknown short native names so a future FerroCrypt version can introduce a new native recipient type without breaking forward-compatible parsing in older readers.
 - `is_reserved_native_name(name)` — internal building block: returns `true` when `name` has the shape of a reserved FerroCrypt native type (no `/`, plus a reserved native prefix in `["mlkem", "pq", "hpke", "tag", "xwing", "kem"]` or the reserved `tag` suffix per `FORMAT.md` §3.3.1).
-- `validate_external_type_name(name)` — runs the grammar check, then enforces the §3.3.1 namespace policy: the name MUST contain `/` and MUST NOT impersonate a reserved native shape. No public plugin / third-party recipient registration surface ships today, so this validator currently has no in-tree caller; it exists so the §3.3.1 policy is enforceable the moment such a surface is added.
+- `validate_external_type_name(name)` — runs the grammar check, then enforces the §3.3.1 namespace policy: the name MUST contain `/`, MUST NOT impersonate a reserved native shape, and MUST NOT be a test type name (`test/` prefix). No public plugin / third-party recipient registration surface ships today, so this validator currently has no in-tree caller; it exists so the §3.3.1 policy is enforceable the moment such a surface is added.
 
 `is_reserved_native_name` and `validate_external_type_name` are `pub(crate)` until a plugin-facing API needs them; only `validate_type_name_grammar` and `TYPE_NAME_MAX_LEN` are re-exported through `recipient::mod`.
 

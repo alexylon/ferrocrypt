@@ -9,10 +9,11 @@
 //!   native recipient type (e.g. `mlkem768`) without breaking
 //!   forward-compatible parsing in older readers.
 //! * [`validate_external_type_name`] enforces the §3.3.1 plugin
-//!   namespace policy on top of the grammar: the name must contain `/`
-//!   and must not impersonate a reserved native shape. It is the entry
-//!   point any future plugin / third-party recipient registration API
-//!   must call before accepting a caller-supplied `type_name`.
+//!   namespace policy on top of the grammar: the name must contain `/`,
+//!   must not impersonate a reserved native shape, and must not be a test
+//!   type name. It is the entry point any future plugin / third-party
+//!   recipient registration API must call before accepting a
+//!   caller-supplied `type_name`.
 //!
 //! Native-name prefixes `mlkem`, `pq`, `hpke`, `tag`, `xwing`, `kem`
 //! and any name ending in `tag` are reserved by the FerroCrypt
@@ -33,6 +34,11 @@ const RESERVED_NATIVE_PREFIXES: &[&str] = &["mlkem", "pq", "hpke", "tag", "xwing
 /// Native-name suffix reserved by the FerroCrypt specification for
 /// future FerroCrypt-defined recipient types (`FORMAT.md` §3.3.1).
 const RESERVED_NATIVE_SUFFIX: &str = "tag";
+
+/// Prefix of the test type names `FORMAT.md` §3.3.1 sets aside for
+/// conformance testing. No specification defines a type under it and no
+/// implementation may implement one.
+pub(crate) const TEST_TYPE_NAME_PREFIX: &str = "test/";
 
 /// Validates a recipient `type_name` against the byte-level grammar in
 /// `FORMAT.md` §3.3:
@@ -96,11 +102,13 @@ pub(crate) fn is_reserved_native_name(name: &str) -> bool {
 /// Validates a `type_name` supplied by a third-party / plugin caller
 /// against the §3.3 grammar **and** the §3.3.1 namespace policy:
 ///
-/// - it must contain `/` (no native-namespace squatting); and
+/// - it must contain `/` (no native-namespace squatting);
 /// - it must not impersonate a reserved FerroCrypt native shape (which
 ///   is structurally implied by the `/` requirement, but checked
 ///   explicitly so future spec changes that loosen the `/` rule cannot
-///   silently re-open the reserved range).
+///   silently re-open the reserved range); and
+/// - it must not be a test type name, which no implementation may
+///   implement.
 ///
 /// On failure surfaces [`crate::error::FormatDefect::MalformedTypeName`].
 ///
@@ -111,7 +119,10 @@ pub(crate) fn is_reserved_native_name(name: &str) -> bool {
 #[allow(dead_code)]
 pub(crate) fn validate_external_type_name(name: &str) -> Result<(), CryptoError> {
     validate_type_name_grammar(name)?;
-    if !name.contains('/') || is_reserved_native_name(name) {
+    if !name.contains('/')
+        || is_reserved_native_name(name)
+        || name.starts_with(TEST_TYPE_NAME_PREFIX)
+    {
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName));
     }
     Ok(())
@@ -229,5 +240,20 @@ mod tests {
             assert!(validate_external_type_name(bad).is_err(), "{bad}");
         }
         assert!(validate_external_type_name("example.com/future").is_ok());
+    }
+
+    /// `FORMAT.md` §3.3.1 sets the `test/` names aside, so no plugin may
+    /// claim one; a name that only contains `test` elsewhere is not one.
+    #[test]
+    fn external_type_name_rejects_test_type_names() {
+        for bad in ["test/unknown", "test/future-kem", "test/a"] {
+            match validate_external_type_name(bad) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
+                other => panic!("expected MalformedTypeName for `{bad}`, got {other:?}"),
+            }
+        }
+        for good in ["example.com/test", "tests/unknown", "example.test/unknown"] {
+            assert!(validate_external_type_name(good).is_ok(), "{good}");
+        }
     }
 }

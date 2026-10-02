@@ -354,16 +354,42 @@ pub fn is_corpus_reference(value: &str) -> bool {
     value.split('/').all(is_manifest_id)
 }
 
+/// The prefix of the test type names `FORMAT.md` §3.3.1 sets aside. No
+/// implementation implements a type under it, so no capability names one.
+pub const TEST_TYPE_NAME_PREFIX: &str = "test/";
+
+/// The ignorable test tag `FORMAT.md` §6 sets aside in every TLV namespace.
+pub const IGNORABLE_TEST_TAG: u16 = 0x0001;
+
+/// The critical test tag `FORMAT.md` §6 sets aside in every TLV namespace.
+pub const CRITICAL_TEST_TAG: u16 = 0x8001;
+
+/// Whether `type_name` is a test type name (`FORMAT.md` §3.3.1).
+pub fn is_test_type_name(type_name: &str) -> bool {
+    type_name.starts_with(TEST_TYPE_NAME_PREFIX)
+}
+
+/// Whether `tag` is one of the test tags of `FORMAT.md` §6.
+pub fn is_test_tag(tag: u16) -> bool {
+    tag == IGNORABLE_TEST_TAG || tag == CRITICAL_TEST_TAG
+}
+
+/// The tags `FORMAT.md` §6 reserves, which every reader rejects, so no
+/// capability names one.
+const RESERVED_TAGS: [u16; 2] = [0x0000, 0x8000];
+
 /// Whether `value` has one of the capability-ID forms of `FORMAT.md` §12.2: a
 /// stored version domain with two uppercase hexadecimal digits other than the
-/// reserved `0x00`, a TLV namespace with four, or a recipient or key type with
-/// its name.
+/// reserved `0x00`, a TLV namespace with four other than a reserved or test
+/// tag, or a recipient or key type with its name, other than a test type name.
+/// A reserved or test value is never implemented, so §12.2 names no capability
+/// after one.
 pub fn is_capability_id(value: &str) -> bool {
     let Some((domain, subject)) = value.split_once(':') else {
         return false;
     };
     let hex_digits = |digits: usize| {
-        subject.strip_prefix("0x").is_some_and(|hex| {
+        subject.strip_prefix("0x").filter(|hex| {
             hex.len() == digits
                 && hex
                     .chars()
@@ -372,10 +398,12 @@ pub fn is_capability_id(value: &str) -> bool {
     };
     match domain {
         "outer_version" | "fca_version" | "public_key_version" | "private_key_version" => {
-            hex_digits(2) && subject != "0x00"
+            hex_digits(2).is_some() && subject != "0x00"
         }
-        "outer_tlv" | "private_key_tlv" | "fca_archive_tlv" | "fca_entry_tlv" => hex_digits(4),
-        "recipient_type" | "key_type" => !subject.is_empty(),
+        "outer_tlv" | "private_key_tlv" | "fca_archive_tlv" | "fca_entry_tlv" => hex_digits(4)
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+            .is_some_and(|tag| !is_test_tag(tag) && !RESERVED_TAGS.contains(&tag)),
+        "recipient_type" | "key_type" => !subject.is_empty() && !is_test_type_name(subject),
         _ => false,
     }
 }
@@ -663,9 +691,10 @@ mod tests {
         for valid in [
             "outer_version:0x02",
             "private_key_version:0xFF",
-            "fca_entry_tlv:0x8001",
-            "recipient_type:test/unknown",
-            "key_type:test/unknown",
+            "fca_entry_tlv:0x8002",
+            "outer_tlv:0x0002",
+            "recipient_type:example.com/future",
+            "key_type:t",
         ] {
             assert_eq!(capability(valid), None, "{valid:?}");
         }
@@ -678,6 +707,12 @@ mod tests {
             "recipient_type:",
             "unknown_domain:0x01",
             "outer_version",
+            "outer_tlv:0x0001",
+            "fca_entry_tlv:0x8001",
+            "outer_tlv:0x0000",
+            "fca_archive_tlv:0x8000",
+            "recipient_type:test/unknown",
+            "key_type:test/future-kem",
         ] {
             assert!(
                 capability(invalid).is_some(),

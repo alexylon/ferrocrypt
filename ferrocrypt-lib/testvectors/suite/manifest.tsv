@@ -33,7 +33,7 @@ cases/x25519-small-order-ephemeral.fcr	decrypt	private-key:keys/recipient-a.priv
 cases/tlv-bad-order.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/tlv-duplicate-tag.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/tlv-len-past-end.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
-cases/tlv-unknown-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Newer FerroCrypt is needed for file feature tag 0x8001
+cases/tlv-unknown-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Newer FerroCrypt is needed for file feature tag 0x8002
 cases/tlv-unknown-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
 cases/kdf-mem-over-max.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(MemoryCost)	File has invalid KDF settings (memory 2097153 KiB)
 cases/kdf-lanes-zero.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(Parallelism)	File has invalid KDF settings (parallelism 0)
@@ -80,10 +80,10 @@ cases/x25519-invalid-length.fcr	decrypt	private-key:keys/recipient-a.private.key
 cases/x25519-invalid-flag.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
 cases/fca-archive-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
 cases/fca-archive-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
-cases/fca-archive-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Newer FerroCrypt is needed for file feature tag 0x8001
+cases/fca-archive-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	File uses test tag 0x8001, which no reader supports
 cases/fca-entry-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
 cases/fca-entry-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
-cases/fca-entry-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Newer FerroCrypt is needed for file feature tag 0x8001
+cases/fca-entry-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	File uses test tag 0x8001, which no reader supports
 cases/public-key-noncanonical-padding.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-newer-version.key	read-public-key	-	error	UnsupportedVersion(NewerPublicKey)	Newer FerroCrypt is needed for public-key version byte 0x02
 cases/public-key-crlf.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed

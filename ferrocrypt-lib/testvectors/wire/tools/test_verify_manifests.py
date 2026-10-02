@@ -171,6 +171,38 @@ class CommittedCorpus(unittest.TestCase):
         self.assertTrue(output.rstrip().endswith("— OK"), output)
 
 
+class TestValueCapabilities(unittest.TestCase):
+    """No reader implements a test type name, a test tag, or a reserved tag,
+    so no capability may name one."""
+
+    def test_the_capability_form_refuses_test_values(self):
+        for capability, accepted in [
+            ("recipient_type:test/unknown", False),
+            ("key_type:test/future-kem", False),
+            ("outer_tlv:0x0001", False),
+            ("fca_entry_tlv:0x8001", False),
+            ("outer_tlv:0x0000", False),
+            ("fca_archive_tlv:0x8000", False),
+            ("recipient_type:example.com/future", True),
+            ("outer_tlv:0x0002", True),
+        ]:
+            with self.subTest(capability=capability):
+                self.assertEqual(bool(verify_manifests.CAPABILITY.match(capability)), accepted)
+
+    def test_a_row_naming_a_test_value_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="ferrocrypt-verifier-test-") as tmp:
+            root = Path(tmp) / "wire"
+            shutil.copytree(CORPUS, root)
+            plant_fields(
+                root / "cases.tsv",
+                lambda row: row["expectation_scope"] == "capability_relative",
+                {"capability_id": "recipient_type:test/unknown"},
+            )
+            status, output = run_verifier(root)
+            self.assertNotEqual(status, 0, output)
+            self.assertIn("capability identifier form", output)
+
+
 class RejectedReferences(unittest.TestCase):
     """A reference the grammar refuses is reported, fails the run, and is
     never joined onto the corpus root for any filesystem access."""

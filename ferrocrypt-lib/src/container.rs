@@ -247,11 +247,11 @@ impl HeaderReadLimits {
     /// in; the product with [`format::PREFIX_SIZE`] is the total input
     /// [`format::verify_header_mac`] can be handed for one file.
     ///
-    /// Both readers call this right after recipient classification, so a
-    /// file over the cap is refused before any private-key unlock, KDF,
-    /// or MAC work. The writer calls it against the entry list it is
-    /// about to seal, so it never emits a file the same-configured
-    /// reader would refuse.
+    /// The reader calls this right after recipient classification, so a
+    /// file over the cap is refused before any private-key unlock, key
+    /// agreement, KDF, or MAC work (`FORMAT.md` §3.7). The writer calls it
+    /// against the entry list it is about to seal, so it never emits a file
+    /// the same-configured reader would refuse.
     ///
     /// The arithmetic is `u64` and saturating: the operands come from a
     /// `u16`-bounded count and a `u32` length, so the true product

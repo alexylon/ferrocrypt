@@ -453,11 +453,11 @@ impl DecryptSession {
         // work, enforcing local limits before allocation.
         let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
-        // Steps 5-9 plus the aggregate work bound: reject unsupported
-        // critical recipients, native entries with invalid flags or
-        // body lengths, invalid recipient combinations, and a recipient
-        // list that would cost too much to verify — all before any KDF
-        // or private-key work.
+        // Steps 6-9 plus the aggregate work bound: reject unsupported
+        // critical recipients, native entries with invalid flags, body
+        // lengths, or body contents, invalid recipient combinations, and a
+        // recipient list that would cost too much to verify — all before
+        // any private-key, key-agreement, or KDF work.
         let mode = classify_recipients_within_limits(&parsed, header_read_limits)?;
 
         Ok(Self {

@@ -409,11 +409,12 @@ verification cost is the product of its recipient count and its header size, not
 the sum, so the first three caps bound each factor without bounding the work.
 Its recommended value, `64 * (12 + 1,048,576)`, is the most work a file within
 the first two caps can demand, so it rejects nothing they accept on their own.
-Readers SHOULD evaluate it after §3.7 step 9 and before step 10, so a file
-over the cap is refused before any private key is unlocked and before any
-recipient KDF or header MAC runs. Writers SHOULD apply it to the entry list
-they are about to seal, counting every supported entry, since a reader cannot
-know which entries will unwrap until after that work.
+A reader that applies this cap MUST evaluate it after §3.7 step 9 and before
+step 10, so a file over the cap is refused before any private key is unlocked
+and before any key agreement, recipient KDF, or header MAC runs. Writers SHOULD
+apply it to the entry list they are about to seal, counting every supported
+entry, since a reader cannot know which entries will unwrap until after that
+work.
 
 Recipient type specifications MAY define smaller structural body limits than the
 global `body_len` limit. Implementations SHOULD apply recipient-specific local
@@ -648,13 +649,22 @@ not part of step 8, because a reader MAY take that policy from its caller after
 classification; a reader MUST still apply them before Argon2id runs. A reader
 MUST NOT unlock a supplied private key (including running its unlock KDF),
 perform X25519 or another KEM operation, or run a recipient KDF until this
-preflight succeeds.
+preflight succeeds and the file is within any aggregate header-MAC cap the
+reader applies (below).
 
-Between step 9 and step 10, readers SHOULD reject a file whose supported
-recipient count multiplied by `12 + header_len` exceeds the aggregate
-header-MAC cap from §3.2. Step 11 authenticates the whole `prefix || header`
-once per candidate, so that product — not `header_len` alone — is the work a
-file can demand, and the check belongs where nothing expensive has run yet.
+Between step 9 and step 10, a reader that applies the aggregate header-MAC
+cap from §3.2 MUST reject a file whose supported recipient count multiplied
+by `12 + header_len` exceeds it. Step 11 authenticates the whole
+`prefix || header` once per candidate, so that product — not `header_len`
+alone — is the work a file can demand, and the check belongs where nothing
+expensive has run yet. A file that breaks a check of steps 1 to 9 therefore
+reports the first such check's class even when it also exceeds the cap, and a
+file that passes those checks but exceeds the cap reports
+`resource_cap_exceeded` even when unlocking the private key or trying a
+recipient would fail: a wrong passphrase, a wrong private-key passphrase, a key
+agreement that fails, a private key that opens no entry, or a header MAC that
+does not verify. The checks §8 makes on a supplied `private.key` before its
+unlock are not ordered against these steps: a reader MAY make them first.
 
 A recipient unwrap is not successful until the header MAC verifies.
 
@@ -3053,7 +3063,7 @@ reused operationally.
 | Prefix and framing | Bad magic; an invariant `.fcr` outer-container version `0x00` case classified as `malformed_header`; a `.fcr` outer-container version `0x02` capability case classified as `unsupported_outer_version`; wrong kind; nonzero flags; the structural maximum; truncation at each framing boundary; and both undersized-header precedence outcomes |
 | Header | Fixed-field accounting, recipient count and range, extension length, header-MAC tamper after successful unwrap, and exact authenticated scope |
 | Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, illegal mixing, and one step-8 diagnostic class for both orders of the same two defective entries |
-| `.fcr` check order | Files that each break at least two checks and none before them, enough to fix the order of every two checks of §3.1 to §3.3, and of §3.7 before any recipient is tried, that report different classes and that one file can break together, counting the version byte as one check per class and leaving out the header-MAC work cap, whose place §3.2 only recommends; a first entry that breaks the last §3.3 check before a second entry the region holds no bytes for; and both orders of an unknown critical entry beside a native entry of the wrong length, and beside one with its critical flag set |
+| `.fcr` check order | Files that each break at least two checks and none before them, enough to fix the order of every two checks of §3.1 to §3.3, and of §3.7 before any recipient is tried, the aggregate header-MAC cap included, that report different classes and that one file can break together, counting the version byte as one check per class; files over that cap that a wrong passphrase, a wrong private-key passphrase, a failing key agreement, a private key that opens no entry, or a modified header MAC would otherwise reject; a first entry that breaks the last §3.3 check before a second entry the region holds no bytes for; and both orders of an unknown critical entry beside a native entry of the wrong length, and beside one with its critical flag set |
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid KDF parameters on every structural dimension, every local KDF cap a structurally valid body can exceed, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, oversized region and value, and a malformed entry after an unknown critical tag |

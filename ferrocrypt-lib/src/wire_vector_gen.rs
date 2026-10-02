@@ -141,7 +141,8 @@ fn ungrammatical_type_name() -> String {
 /// byte of a name, it breaks the grammar without changing any length.
 const UNGRAMMATICAL_TYPE_NAME_BYTE: u8 = 0x00;
 
-/// The byte that fills every region whose content does not matter to its case.
+/// The byte that fills every region whose content does not matter to its case,
+/// except the FCA extension values, which keep [`FCA_EXT_FILLER`].
 const FILLER: u8 = 0xAA;
 
 /// A version byte that no stored version domain defines (`FORMAT.md` §11.1),
@@ -175,10 +176,36 @@ fn break_magic(bytes: &mut [u8]) {
     bytes[0] ^= 0xFF;
 }
 
-/// The critical tag the extension-region cases carry. No reader here
-/// implements it, so an artifact that carries it is refused once its region is
-/// authenticated.
+/// The critical tag the extension-region cases carry, in every namespace. No
+/// reader here implements it, so an artifact that carries it is refused once
+/// its region is authenticated.
 const UNKNOWN_CRITICAL_TAG: u16 = 0x8001;
+
+/// A second critical tag no reader here implements, for the cases that put two
+/// critical tags in one region.
+const SECOND_UNKNOWN_CRITICAL_TAG: u16 = 0x8002;
+
+/// The ignorable tag the extension-region cases carry, in every namespace. No
+/// reader here implements it, so a reader authenticates its entry and skips it
+/// (`FORMAT.md` §6). Changing it changes every artifact that carries it.
+const UNKNOWN_IGNORABLE_TAG: u16 = 0x0001;
+
+/// A second ignorable tag no reader here implements, for the cases that put
+/// two tags in one region.
+const SECOND_UNKNOWN_IGNORABLE_TAG: u16 = 0x0002;
+
+/// The reserved tag at the start of the ignorable half of the tag space
+/// (`FORMAT.md` §6). The reserved tags are stated here rather than taken from
+/// the reader, so a mistake there cannot carry into the corpus.
+const IGNORABLE_HALF_RESERVED_TAG: u16 = 0x0000;
+
+/// The reserved tag at the start of the critical half of the tag space
+/// (`FORMAT.md` §6).
+const CRITICAL_HALF_RESERVED_TAG: u16 = 0x8000;
+
+/// The byte the FCA extension-region cases fill their TLV values with. Their
+/// committed bytes were generated with it, so it stays apart from [`FILLER`].
+const FCA_EXT_FILLER: u8 = 0x41;
 
 /// The capability a reader that implements [`UNKNOWN_CRITICAL_TAG`] in the TLV
 /// namespace `domain` declares, so it does not assert the cases whose outcome
@@ -194,7 +221,7 @@ fn critical_tag_capability(domain: &str) -> String {
 fn critical_tag_then_malformed_entry(critical_value: &[u8]) -> Vec<u8> {
     [
         crate::crypto::tlv::tlv_bytes(UNKNOWN_CRITICAL_TAG, critical_value),
-        tlv_value_running_past_region(UNKNOWN_CRITICAL_TAG + 1),
+        tlv_value_running_past_region(SECOND_UNKNOWN_CRITICAL_TAG),
     ]
     .concat()
 }
@@ -596,10 +623,10 @@ fn small_artifact_caps() -> Vec<(&'static str, u64)> {
 }
 
 /// `max_header_mac_work_bytes` under
-/// [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]: one byte of work below the
-/// refused case, whose header holds an ordinary unknown entry and two
-/// `x25519` entries, so two supported recipients each authenticate
-/// `12 + header_len` bytes (`FORMAT.md` §3.2).
+/// [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]: one byte of work below
+/// `header-mac-work-over-lowered-cap`, whose header holds an ordinary unknown
+/// entry and two `x25519` entries, so two supported recipients each
+/// authenticate `12 + header_len` bytes (`FORMAT.md` §3.2).
 fn lowered_header_mac_work_cap() -> u64 {
     let x25519_slot = RecipientEntry {
         type_name: x25519::TYPE_NAME.to_string(),
@@ -625,6 +652,48 @@ fn header_len_of(entries: &[RecipientEntry]) -> usize {
 /// authenticates the prefix and the header.
 fn header_mac_work(supported: usize, header_len: usize) -> u64 {
     (supported * (crate::format::PREFIX_SIZE + header_len)) as u64
+}
+
+/// The shortest extension region that takes a header holding `entries` past
+/// the header-MAC work cap of [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`],
+/// counting every entry as supported. It is one entry with
+/// [`UNKNOWN_IGNORABLE_TAG`], which a reader authenticates and skips, so it
+/// changes nothing else a reader checks.
+fn padding_past_lowered_header_mac_work_cap(entries: &[RecipientEntry]) -> Vec<u8> {
+    assert!(
+        entries.iter().all(|entry| {
+            crate::recipient::policy::NativeRecipientType::from_type_name(&entry.type_name)
+                .is_some()
+        }),
+        "every entry must be native, so every reader counts it as supported"
+    );
+    let supported = entries.len();
+    let cap = lowered_header_mac_work_cap();
+    let per_recipient = usize::try_from(cap).expect("the cap is small") / supported + 1;
+    let unpadded = header_len_of(entries);
+    let ext_len = per_recipient
+        .checked_sub(crate::format::PREFIX_SIZE + unpadded)
+        .expect("the entries leave room to pad the header");
+    let region = ignorable_tlv_region(ext_len, FILLER);
+    let work = header_mac_work(supported, unpadded + region.len());
+    assert!(
+        work > cap && work - supported as u64 <= cap,
+        "the padding takes the header just past the cap"
+    );
+    region
+}
+
+/// A TLV region of exactly `len` bytes: one entry with
+/// [`UNKNOWN_IGNORABLE_TAG`] whose value is `fill` repeated over the rest.
+fn ignorable_tlv_region(len: usize, fill: u8) -> Vec<u8> {
+    use crate::crypto::tlv::{ENTRY_HEADER_SIZE as TLV_ENTRY_HEADER_SIZE, tlv_bytes};
+
+    let value_len = len
+        .checked_sub(TLV_ENTRY_HEADER_SIZE)
+        .expect("the region holds at least one entry header");
+    let region = tlv_bytes(UNKNOWN_IGNORABLE_TAG, &vec![fill; value_len]);
+    assert_eq!(region.len(), len);
+    region
 }
 
 /// Every `limit-profiles.tsv` row: the [`DEFAULT_LIMIT_PROFILE_ID`] row, then
@@ -1069,8 +1138,6 @@ fn argon2id_entry(file_key: &FileKey) -> RecipientEntry {
     }
 }
 
-/// Parses a `public.key` file held in memory. The file is one canonical
-/// recipient string with an optional trailing LF (`FORMAT.md` §7.1).
 /// An `argon2id` entry whose stored `kdf_params` are replaced after wrapping,
 /// so the body keeps its canonical length and valid header MAC while the
 /// parameters a reader validates are the ones under test.
@@ -1081,6 +1148,8 @@ fn argon2id_entry_with_kdf_params(file_key: &FileKey, params: &KdfParams) -> Rec
     entry
 }
 
+/// Parses a `public.key` file held in memory. The file is one canonical
+/// recipient string with an optional trailing LF (`FORMAT.md` §7.1).
 fn decode_public_key_file(bytes: &[u8]) -> PublicKey {
     std::str::from_utf8(bytes)
         .expect("public.key is UTF-8")
@@ -2183,6 +2252,12 @@ fn payload_offset(bytes: &[u8]) -> usize {
     crate::format::PREFIX_SIZE + header_len + crate::format::HEADER_MAC_SIZE
 }
 
+/// Flips one bit of the header MAC tag, which no check before the MAC reads.
+fn modify_header_mac(bytes: &mut [u8]) {
+    let mac = payload_offset(bytes) - crate::format::HEADER_MAC_SIZE;
+    bytes[mac] ^= 0x01;
+}
+
 /// Inserts `extra` zero bytes after the last recipient entry and raises
 /// `recipient_entries_len` and `header_len` to match, so the §3.2 lengths
 /// still sum while the entries no longer fill their region. The header MAC is
@@ -2390,8 +2465,9 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 /// The `.fcr` check order of `FORMAT.md` §3.1 to §3.3, and of §3.7 before any
 /// recipient is tried. A reader must make every two of these checks that report
 /// different classes, and that one file can break together, in the stated
-/// order. The header-MAC work cap is left out, because §3.2 only recommends
-/// where a reader applies it.
+/// order. The header-MAC work cap follows every check of steps 1 to 9;
+/// [`write_header_mac_work_order_cases`] places it, and also puts it before
+/// every check made while a recipient is tried.
 ///
 /// A rejected case shows that, of the checks it breaks, the reader makes one of
 /// the expected class first. A case that breaks two checks of different
@@ -2408,9 +2484,10 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 /// The version byte, whose outcomes differ in class, counts as one check per
 /// class. Only a pair with a check that a capability changes rests on a
 /// capability-relative case, so a reader that declares a capability loses only
-/// such pairs. A recipient type the reader implements changes two checks:
-/// whether an entry of that type is unknown and critical, and whether the file
-/// holds a supported recipient.
+/// such pairs. A recipient type the reader implements changes three checks:
+/// whether an entry of that type is unknown and critical, whether the file
+/// holds a supported recipient, and how many supported recipients the
+/// header-MAC work cap counts.
 fn write_prefix_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
     use crate::format::{HEADER_LEN_MAX, KIND_PRIVATE_KEY, PREFIX_SIZE};
 
@@ -2662,10 +2739,7 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "header_mac_tag_modified",
         "header_authentication_failed",
-        |b| {
-            let mac = payload_offset(b) - crate::format::HEADER_MAC_SIZE;
-            b[mac] ^= 0x01;
-        },
+        |b| modify_header_mac(b),
     );
 
     write_header_check_order_cases(corpus, base);
@@ -2906,11 +2980,7 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
     // region. No local cap bounds the region, so the default profile applies.
     let scope = case_scope("header-ext-len-at-structural-max");
     let file_key = FileKey::generate().expect("file key");
-    let ext = crate::crypto::tlv::tlv_bytes(
-        0x0001,
-        &vec![FILLER; EXT_LEN_MAX as usize - crate::crypto::tlv::ENTRY_HEADER_SIZE],
-    );
-    assert_eq!(ext.len(), EXT_LEN_MAX as usize);
+    let ext = ignorable_tlv_region(EXT_LEN_MAX as usize, FILLER);
     let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], &ext);
     drop(scope);
     fabricated_accept_fcr_case(
@@ -2950,6 +3020,42 @@ fn crafted_reject_case(
         diagnostic_class,
         built,
     )
+}
+
+/// [`crafted_reject_case`] under the case's own seed scope: `entries` builds
+/// the recipient entries for a freshly generated file key, and `ext` the
+/// extension region for those entries.
+#[allow(clippy::too_many_arguments)]
+fn seeded_crafted_reject_case(
+    corpus: &mut Corpus,
+    sources: &Path,
+    case_id: &str,
+    credential_id: &str,
+    capability_id: Option<&str>,
+    (condition_id, class): (&str, &str),
+    entries: &dyn Fn(&FileKey) -> Vec<RecipientEntry>,
+    ext: &dyn Fn(&[RecipientEntry]) -> Vec<u8>,
+) -> MutationBase {
+    let _scope = case_scope(case_id);
+    let file_key = FileKey::generate().expect("file key");
+    let entries = entries(&file_key);
+    crafted_reject_case(
+        corpus,
+        sources,
+        case_id,
+        credential_id,
+        capability_id,
+        condition_id,
+        class,
+        &file_key,
+        &entries,
+        &ext(&entries),
+    )
+}
+
+/// The empty extension region, for a header that carries none.
+fn no_extension(_entries: &[RecipientEntry]) -> Vec<u8> {
+    Vec::new()
 }
 
 /// Commits `built` as a rejected case that anchors its own payload origin,
@@ -3000,6 +3106,17 @@ fn build_fcr_with_entries(
 /// Drops the last byte of a recipient's body, so it is one byte short.
 fn shorten_body(entry: &mut RecipientEntry) {
     entry.body.pop();
+}
+
+/// An `x25519` entry for corpus key `a`, damaged by `damage`.
+fn damaged_x25519(
+    keys: &CorpusKeys,
+    file_key: &FileKey,
+    damage: fn(&mut RecipientEntry),
+) -> RecipientEntry {
+    let mut entry = x25519_entry(&keys.public_a, file_key);
+    damage(&mut entry);
+    entry
 }
 
 /// Zeroes an `x25519` body's ephemeral public key, which the §4.2 preflight
@@ -3454,39 +3571,13 @@ fn write_recipient_check_order_cases(
     // critical entry, so a case whose class comes from that entry is
     // capability-relative.
     let unknown_type = format!("recipient_type:{UNKNOWN_RECIPIENT_TYPE}");
-    let damaged_x25519 = |file_key: &FileKey, damage: fn(&mut RecipientEntry)| {
-        let mut entry = x25519_entry(&keys.public_a, file_key);
-        damage(&mut entry);
-        entry
-    };
     let break_second_type_name = |b: &mut Vec<u8>| {
         let second_type_name = first_entry_end(b) + ENTRY_HEADER_SIZE;
         b[second_type_name] = UNGRAMMATICAL_TYPE_NAME_BYTE;
     };
-    let crafted = |corpus: &mut Corpus,
-                   case_id: &str,
-                   credential_id: &str,
-                   capability_id: Option<&str>,
-                   (condition_id, class): (&str, &str),
-                   entries: &dyn Fn(&FileKey) -> Vec<RecipientEntry>| {
-        let _scope = case_scope(case_id);
-        let file_key = FileKey::generate().expect("file key");
-        crafted_reject_case(
-            corpus,
-            sources,
-            case_id,
-            credential_id,
-            capability_id,
-            condition_id,
-            class,
-            &file_key,
-            &entries(&file_key),
-            b"",
-        )
-    };
-
-    let lone_critical = crafted(
+    let lone_critical = seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-unknown-critical-before-none-supported",
         "passphrase-main",
         Some(&unknown_type),
@@ -3495,6 +3586,7 @@ fn write_recipient_check_order_cases(
             "unknown_critical_recipient",
         ),
         &|_| vec![unknown_entry(true)],
+        &no_extension,
     );
     let lone_critical_cases: [ByteMutationCase; 2] = [
         (
@@ -3539,8 +3631,9 @@ fn write_recipient_check_order_cases(
         },
     );
 
-    let short_then_critical = crafted(
+    let short_then_critical = seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-unknown-critical-before-native-length-x25519-first",
         "private-key-a",
         Some(&unknown_type),
@@ -3548,7 +3641,13 @@ fn write_recipient_check_order_cases(
             "critical_recipient_type_unsupported_and_x25519_body_short_x25519_first",
             "unknown_critical_recipient",
         ),
-        &|file_key| vec![damaged_x25519(file_key, shorten_body), unknown_entry(true)],
+        &|file_key| {
+            vec![
+                damaged_x25519(keys, file_key, shorten_body),
+                unknown_entry(true),
+            ]
+        },
+        &no_extension,
     );
     // The second entry keeps its critical flag; its malformed type name is
     // found first.
@@ -3561,8 +3660,9 @@ fn write_recipient_check_order_cases(
         "malformed_type_name",
         break_second_type_name,
     );
-    crafted(
+    seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-unknown-critical-before-native-length-unknown-first",
         "private-key-a",
         Some(&unknown_type),
@@ -3570,13 +3670,20 @@ fn write_recipient_check_order_cases(
             "critical_recipient_type_unsupported_and_x25519_body_short_unknown_first",
             "unknown_critical_recipient",
         ),
-        &|file_key| vec![unknown_entry(true), damaged_x25519(file_key, shorten_body)],
+        &|file_key| {
+            vec![
+                unknown_entry(true),
+                damaged_x25519(keys, file_key, shorten_body),
+            ]
+        },
+        &no_extension,
     );
 
     // The same three for a native entry whose critical flag is set, the other
     // step-8 framing check.
-    let flagged_then_critical = crafted(
+    let flagged_then_critical = seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-unknown-critical-before-native-flags-x25519-first",
         "private-key-a",
         Some(&unknown_type),
@@ -3586,10 +3693,11 @@ fn write_recipient_check_order_cases(
         ),
         &|file_key| {
             vec![
-                damaged_x25519(file_key, set_critical_flag),
+                damaged_x25519(keys, file_key, set_critical_flag),
                 unknown_entry(true),
             ]
         },
+        &no_extension,
     );
     mutate_fcr(
         corpus,
@@ -3600,8 +3708,9 @@ fn write_recipient_check_order_cases(
         "malformed_type_name",
         break_second_type_name,
     );
-    crafted(
+    seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-unknown-critical-before-native-flags-unknown-first",
         "private-key-a",
         Some(&unknown_type),
@@ -3612,13 +3721,15 @@ fn write_recipient_check_order_cases(
         &|file_key| {
             vec![
                 unknown_entry(true),
-                damaged_x25519(file_key, set_critical_flag),
+                damaged_x25519(keys, file_key, set_critical_flag),
             ]
         },
+        &no_extension,
     );
 
-    crafted(
+    seeded_crafted_reject_case(
         corpus,
+        sources,
         "recipient-order-body-content-before-mixing",
         "passphrase-main",
         None,
@@ -3627,9 +3738,10 @@ fn write_recipient_check_order_cases(
             "malformed_recipient_entry",
         ),
         &|file_key| {
-            let zero_ephemeral = damaged_x25519(file_key, zero_x25519_ephemeral);
+            let zero_ephemeral = damaged_x25519(keys, file_key, zero_x25519_ephemeral);
             vec![argon2id_entry(file_key), zero_ephemeral]
         },
+        &no_extension,
     );
 }
 
@@ -3996,7 +4108,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
-    let ext = tlv_bytes(0x0001, b"ignorable");
+    let ext = tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"ignorable");
     let built = build_fcr_with_entries(&source, &file_key, &entries, &ext);
     accept_fcr_case(
         corpus,
@@ -4010,31 +4122,39 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     // A TLV entry is `tag:u16 || len:u32 || value`, so its length field
     // starts after the tag.
     let tlv_len_at = size_of::<u16>();
-    let mut truncated_value = tlv_bytes(0x0001, b"");
+    let mut truncated_value = tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"");
     write_u32_be(&mut truncated_value, tlv_len_at, 99);
 
     let cases: [(&str, Vec<u8>, &str, &str); 8] = [
         (
             "tlv-reserved-tag-0000",
-            tlv_bytes(0x0000, b"x"),
+            tlv_bytes(IGNORABLE_HALF_RESERVED_TAG, b"x"),
             "tlv_tag_reserved",
             "malformed_tlv",
         ),
         (
             "tlv-reserved-tag-8000",
-            tlv_bytes(0x8000, b"x"),
+            tlv_bytes(CRITICAL_HALF_RESERVED_TAG, b"x"),
             "tlv_tag_reserved",
             "malformed_tlv",
         ),
         (
             "tlv-duplicate-tags",
-            [tlv_bytes(0x0001, b"a"), tlv_bytes(0x0001, b"b")].concat(),
+            [
+                tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"a"),
+                tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"b"),
+            ]
+            .concat(),
             "tlv_tags_not_strictly_ascending",
             "malformed_tlv",
         ),
         (
             "tlv-out-of-order-tags",
-            [tlv_bytes(0x0002, b"a"), tlv_bytes(0x0001, b"b")].concat(),
+            [
+                tlv_bytes(SECOND_UNKNOWN_IGNORABLE_TAG, b"a"),
+                tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"b"),
+            ]
+            .concat(),
             "tlv_tags_not_strictly_ascending",
             "malformed_tlv",
         ),
@@ -4053,7 +4173,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
         (
             "tlv-value-above-cap",
             {
-                let mut entry = tlv_bytes(0x0001, b"");
+                let mut entry = tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"");
                 write_u32_be(&mut entry, tlv_len_at, crate::format::EXT_LEN_MAX + 1);
                 entry
             },
@@ -4093,7 +4213,12 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
-    let built = build_fcr_with_entries(&source, &file_key, &entries, &tlv_bytes(0x0001, b""));
+    let built = build_fcr_with_entries(
+        &source,
+        &file_key,
+        &entries,
+        &tlv_bytes(UNKNOWN_IGNORABLE_TAG, b""),
+    );
     accept_fcr_case(
         corpus,
         "tlv-empty-value",
@@ -5334,7 +5459,7 @@ fn write_private_key_ext_and_pair_cases(
         "private-key-ext-ignorable",
         &seal(
             "private-key-ext-ignorable",
-            &tlv_bytes(0x0001, b"ignorable"),
+            &tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"ignorable"),
             &opened.public,
         ),
         "private-key-a",
@@ -5362,7 +5487,7 @@ fn write_private_key_ext_and_pair_cases(
         "private-key-ext-malformed",
         &seal(
             "private-key-ext-malformed",
-            &tlv_value_running_past_region(0x0001),
+            &tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             &opened.public,
         ),
         "private-key-a",
@@ -5629,7 +5754,6 @@ fn with_private_key_region(key: &[u8], len_offset: usize, region: &[u8]) -> Vec<
 }
 
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
-    use crate::crypto::tlv::{ENTRY_HEADER_SIZE as TLV_ENTRY_HEADER_SIZE, tlv_bytes};
     use crate::key::private::{
         EXT_LEN_OFFSET, KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
         PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
@@ -5796,10 +5920,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // once, a one-byte type name with empty public and extension regions. A
     // reader that set any of these limits one unit too strict would report
     // `malformed_private_key` where §8 requires `unsupported_key_type`.
-    let extension = tlv_bytes(
-        0x0001,
-        &vec![FILLER; PRIVATE_KEY_EXT_LEN_MAX as usize - TLV_ENTRY_HEADER_SIZE],
-    );
+    let extension = ignorable_tlv_region(PRIVATE_KEY_EXT_LEN_MAX as usize, FILLER);
     let on_limits = [
         (
             "private-key-type-name-len-at-max",
@@ -6517,7 +6638,7 @@ fn write_private_key_order_cases(
             "private-key-open-order-authentication-before-ext",
             x25519::TYPE_NAME,
             opened.public.as_slice(),
-            tlv_value_running_past_region(0x0001),
+            tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a-wrong-unlock",
             None,
             "private_key_wrong_unlock_passphrase_and_ext_value_runs_past_region",
@@ -6537,7 +6658,7 @@ fn write_private_key_order_cases(
             "private-key-open-order-ext-before-type-support",
             UNSUPPORTED_KEY_TYPE,
             opened.public.as_slice(),
-            tlv_value_running_past_region(0x0001),
+            tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a",
             None,
             "private_key_ext_value_runs_past_region_and_type_not_supported",
@@ -6567,7 +6688,7 @@ fn write_private_key_order_cases(
             "private-key-open-order-ext-before-type-rules",
             x25519::TYPE_NAME,
             public_short,
-            tlv_value_running_past_region(0x0001),
+            tlv_value_running_past_region(UNKNOWN_IGNORABLE_TAG),
             "private-key-a",
             None,
             "private_key_ext_value_runs_past_region_and_x25519_public_material_not_32_bytes",
@@ -6972,7 +7093,7 @@ fn write_fca_cases(corpus: &mut Corpus) {
     );
     let mut cut_in_archive_ext = build_fca(
         &[FcaEntry::file("p.txt", b"fca payload")],
-        &tlv_bytes(0x0001, b"ext"),
+        &tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"ext"),
     );
     let archive_ext_end =
         header_size + be_u32_at(&cut_in_archive_ext, FCA_OFF_ARCHIVE_EXT_LEN) as usize;
@@ -7263,13 +7384,13 @@ fn write_fca_cases(corpus: &mut Corpus) {
     fca_case(
         corpus,
         "fca-archive-ext-ignorable",
-        &archive_ext(&tlv_bytes(0x0001, b"archive")),
+        &archive_ext(&tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"archive")),
         Ok(b"fca payload".to_vec()),
     );
     fca_case(
         corpus,
         "fca-entry-ext-ignorable",
-        &entry_ext(&tlv_bytes(0x0001, b"entry")),
+        &entry_ext(&tlv_bytes(UNKNOWN_IGNORABLE_TAG, b"entry")),
         Ok(b"fca payload".to_vec()),
     );
     fca_capability_case(
@@ -7323,13 +7444,13 @@ fn write_fca_cases(corpus: &mut Corpus) {
     fca_case(
         corpus,
         "fca-archive-ext-reserved-tag",
-        &archive_ext(&tlv_bytes(0x0000, b"r")),
+        &archive_ext(&tlv_bytes(IGNORABLE_HALF_RESERVED_TAG, b"r")),
         Err(("fca_archive_ext_tag_reserved", "malformed_tlv")),
     );
     fca_case(
         corpus,
         "fca-entry-ext-reserved-tag",
-        &entry_ext(&tlv_bytes(0x0000, b"r")),
+        &entry_ext(&tlv_bytes(IGNORABLE_HALF_RESERVED_TAG, b"r")),
         Err(("fca_entry_ext_tag_reserved", "malformed_tlv")),
     );
 
@@ -7372,8 +7493,6 @@ fn write_fca_cases(corpus: &mut Corpus) {
 /// so each is replayed under the limit profile its row names: the `0.3.0`
 /// defaults, which the condition IDs call the default cap.
 fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
-    use crate::crypto::tlv::tlv_bytes;
-
     // Every cap an artifact can sit on is driven from both sides: one artifact
     // one unit past it, which must be refused, and one sitting exactly on it,
     // which must be accepted. A reader that placed a limit one unit low refuses
@@ -7432,15 +7551,12 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         ArchiveLimits::ENTRY_EXT_BYTES_DEFAULT as usize,
         "one oversized region serves both caps only while they agree"
     );
-    let oversized = vec![0x41u8; region_cap + 1 - crate::crypto::tlv::ENTRY_HEADER_SIZE];
-    let at_cap = vec![0x41u8; region_cap - crate::crypto::tlv::ENTRY_HEADER_SIZE];
+    let oversized = ignorable_tlv_region(region_cap + 1, FCA_EXT_FILLER);
+    let at_cap = ignorable_tlv_region(region_cap, FCA_EXT_FILLER);
     fca_case(
         corpus,
         "fca-archive-ext-over-default-cap",
-        &build_fca(
-            &[FcaEntry::file("p.txt", b"x")],
-            &tlv_bytes(0x0001, &oversized),
-        ),
+        &build_fca(&[FcaEntry::file("p.txt", b"x")], &oversized),
         Err((
             "fca_archive_ext_bytes_above_default_cap",
             "resource_cap_exceeded",
@@ -7449,17 +7565,14 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     fca_case(
         corpus,
         "fca-archive-ext-at-default-cap",
-        &build_fca(
-            &[FcaEntry::file("p.txt", b"fca payload")],
-            &tlv_bytes(0x0001, &at_cap),
-        ),
+        &build_fca(&[FcaEntry::file("p.txt", b"fca payload")], &at_cap),
         Ok(b"fca payload".to_vec()),
     );
     fca_case(
         corpus,
         "fca-entry-ext-over-default-cap",
         &build_fca(
-            &[FcaEntry::file("p.txt", b"x").with_entry_ext(&tlv_bytes(0x0001, &oversized))],
+            &[FcaEntry::file("p.txt", b"x").with_entry_ext(&oversized)],
             b"",
         ),
         Err((
@@ -7471,7 +7584,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "fca-entry-ext-at-default-cap",
         &build_fca(
-            &[FcaEntry::file("p.txt", b"fca payload").with_entry_ext(&tlv_bytes(0x0001, &at_cap))],
+            &[FcaEntry::file("p.txt", b"fca payload").with_entry_ext(&at_cap)],
             b"",
         ),
         Ok(b"fca payload".to_vec()),
@@ -7809,13 +7922,14 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
 /// profile keeps out of reach: a file one unit past the cap is refused and
 /// one sitting exactly on it is accepted.
 fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
-    use crate::crypto::tlv::{ENTRY_HEADER_SIZE, tlv_bytes};
+    use crate::crypto::tlv::tlv_bytes;
 
     // The per-value TLV cap in both FCA namespaces. A value past it is
     // `malformed_tlv`, the class `FORMAT.md` §9.12 gives this cap.
     under_limit_profile(corpus, LOWERED_TLV_VALUE_LIMIT_PROFILE_ID, |corpus| {
         let content = b"fca payload";
-        let value = |len: u64| tlv_bytes(0x0001, &vec![0x41; len as usize]);
+        let value =
+            |len: u64| tlv_bytes(UNKNOWN_IGNORABLE_TAG, &vec![FCA_EXT_FILLER; len as usize]);
         let archive_ext = |len| build_fca(&[FcaEntry::file("p.txt", content)], &value(len));
         let entry_ext = |len| {
             build_fca(
@@ -7855,7 +7969,7 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
     // past it and then exactly to it.
     under_limit_profile(corpus, LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID, |corpus| {
         let half = LOWERED_TOTAL_ENTRY_EXT_CAP as usize / 2;
-        let region = |len: usize| tlv_bytes(0x0001, &vec![0x41; len - ENTRY_HEADER_SIZE]);
+        let region = |len: usize| ignorable_tlv_region(len, FCA_EXT_FILLER);
         let tree = |file_region: usize| {
             [
                 FcaEntry::dir("root").with_entry_ext(&region(half)),
@@ -7935,7 +8049,105 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
             b"",
         );
         drop(scope);
+
+        write_header_mac_work_order_cases(corpus, sources, keys);
     });
+}
+
+/// The place of the header-MAC work cap in `FORMAT.md` §3.7: after every
+/// check of steps 1 to 9, and before the private-key unlock and any recipient
+/// is tried. Each file holds native entries only, padded just past the cap. An
+/// `argon2id` entry mixed with an `x25519` entry reports the mixing class,
+/// which, through the order the step-8 cases already fix, puts the cap after
+/// every recipient check. A file of one `x25519` entry is refused by the cap
+/// with the key the entry is for. A wrong passphrase on a file of one
+/// `argon2id` entry and, on the `x25519` file, a wrong private-key passphrase,
+/// a key agreement that yields the all-zero shared secret, a private key that
+/// opens no entry, and a modified header MAC each report the cap too, so it
+/// precedes the unlock and every check made while a recipient is tried.
+fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
+    let padding = padding_past_lowered_header_mac_work_cap;
+    let opened_by_a = |file_key: &FileKey| vec![x25519_entry(&keys.public_a, file_key)];
+
+    seeded_crafted_reject_case(
+        corpus,
+        sources,
+        "header-mac-work-order-mixing-before-cap",
+        "passphrase-main",
+        None,
+        (
+            "argon2id_mixed_with_another_recipient_and_header_mac_work_above_local_cap",
+            "incompatible_recipients",
+        ),
+        &|file_key| [vec![argon2id_entry(file_key)], opened_by_a(file_key)].concat(),
+        &padding,
+    );
+    let opened = seeded_crafted_reject_case(
+        corpus,
+        sources,
+        "header-mac-work-over-lowered-cap-native-entries",
+        "private-key-a",
+        None,
+        ("header_mac_work_above_local_cap", "resource_cap_exceeded"),
+        &opened_by_a,
+        &padding,
+    );
+    seeded_crafted_reject_case(
+        corpus,
+        sources,
+        "header-mac-work-order-cap-before-passphrase-unwrap",
+        "passphrase-wrong",
+        None,
+        (
+            "header_mac_work_above_local_cap_and_argon2id_wrong_passphrase",
+            "resource_cap_exceeded",
+        ),
+        &|file_key| vec![argon2id_entry(file_key)],
+        &padding,
+    );
+    // The same file with a credential that cannot open it: a wrong
+    // private-key passphrase, then a private key no entry is for.
+    recredential_case(
+        corpus,
+        &opened,
+        "header-mac-work-order-cap-before-private-key-unlock",
+        "private-key-a-wrong-unlock",
+        "header_mac_work_above_local_cap_and_private_key_wrong_unlock_passphrase",
+        "resource_cap_exceeded",
+    );
+    recredential_case(
+        corpus,
+        &opened,
+        "header-mac-work-order-cap-before-x25519-unwrap",
+        "private-key-b",
+        "header_mac_work_above_local_cap_and_x25519_recipient_key_does_not_open_any_slot",
+        "resource_cap_exceeded",
+    );
+    // With the key the entry is for, the same file with an ephemeral key that
+    // makes the key agreement yield the all-zero shared secret, then with its
+    // header MAC modified, so that only the MAC would fail.
+    let ephemeral = body_offset(x25519::TYPE_NAME);
+    mutate_fcr(
+        corpus,
+        &opened,
+        "header-mac-work-order-cap-before-x25519-shared-secret",
+        "private-key-a",
+        "header_mac_work_above_local_cap_and_x25519_all_zero_shared_secret",
+        "resource_cap_exceeded",
+        |b| {
+            b[ephemeral..ephemeral + x25519::PUBLIC_KEY_SIZE]
+                .copy_from_slice(&SMALL_ORDER_EPHEMERAL)
+        },
+    );
+    mutate_fcr(
+        corpus,
+        &opened,
+        "header-mac-work-order-cap-before-header-mac",
+        "private-key-a",
+        "header_mac_work_above_local_cap_and_header_mac_tag_modified",
+        "resource_cap_exceeded",
+        |b| modify_header_mac(b),
+    );
 }
 
 // ─── Payload STREAM known-answer tests ─────────────────────────────────────

@@ -245,11 +245,23 @@ classes and that one file can break together, with a step whose outcomes differ
 in class, such as the version, counted as one check per class. Only a pair with
 a check that a capability changes rests on a capability-relative case, so a
 reader that declares a capability loses only such pairs. A recipient type the
-reader implements changes two checks: whether an entry of that type is unknown
-and critical, and whether the file holds a supported recipient. The header-MAC
-work cap has no such case, because §3.2 only recommends where a reader applies
-it. Two `.fcr` rules order entries rather than checks, so each has its own
-cases. §3.3 takes each entry through every check before it reads the next:
+reader implements changes three checks: whether an entry of that type is
+unknown and critical, whether the file holds a supported recipient, and how
+many supported recipients the header-MAC work cap counts. The header-MAC
+work cap follows every check of `FORMAT.md` §3.7 steps 1 to 9 and comes before
+the private-key unlock and before any recipient is tried.
+`header-mac-work-order-mixing-before-cap` puts it after the mixing rules and so,
+through the order the step-8 cases already fix, after every recipient check.
+`header-mac-work-order-cap-before-passphrase-unwrap`,
+`header-mac-work-order-cap-before-private-key-unlock`,
+`header-mac-work-order-cap-before-x25519-shared-secret`,
+`header-mac-work-order-cap-before-x25519-unwrap`, and
+`header-mac-work-order-cap-before-header-mac` put it before the unlock and every
+check made while a recipient is tried: a wrong passphrase, a wrong private-key
+passphrase, a key agreement that yields the all-zero shared secret, a private
+key that opens no entry, and a modified header MAC. Two `.fcr` rules order
+entries rather than checks, so each has its own cases. §3.3 takes each entry
+through every check before it reads the next:
 `entry-order-whole-entry-before-next-entry` has a malformed first type name and
 a second entry the region holds no bytes for. §3.7 finishes each step over every
 entry before the next step begins: the

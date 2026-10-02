@@ -1218,7 +1218,7 @@ Every per-cap `if value > cap { return Err(...) }` lives in **one** method on th
 | `prefix.header_len` (resource cap) | `HeaderReadLimits::HEADER_LEN_DEFAULT` (= `format::HEADER_LEN_LOCAL_CAP_DEFAULT`) | `HeaderReadLimits::enforce_header_len` | `container::read_encrypted_header` | `protocol::preflight_header_write_limits` (called from `protocol::encrypt`; run early by `Encryptor::write`) — checks the exact `header_len` the writer will emit against the cap |
 | `header_fixed.recipient_count` (resource cap) | `HeaderReadLimits::RECIPIENT_COUNT_DEFAULT` | `HeaderReadLimits::enforce_recipient_count` | `container::read_encrypted_header` | `protocol::preflight_header_write_limits` |
 | Per-entry `body_len` (resource cap) | `HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT` | `HeaderReadLimits::enforce_recipient_body_len` (writer); inline check in `RecipientEntry::parse_one` (reader; `recipient/entry.rs` sits below `container.rs` in the dep graph, so the helper can't be called from there without a cycle — same comparison, same `RecipientBodyCapExceeded` variant) | `RecipientEntry::parse_one` | `protocol::preflight_header_write_limits` (called against canonical `NativeRecipientType::body_len()`) |
-| Aggregate header-MAC input (resource cap) — `supported_recipient_count × (PREFIX_SIZE + header_len)`, the product the three per-dimension caps above leave unbounded | `HeaderReadLimits::HEADER_MAC_WORK_BYTES_DEFAULT` (= `format::HEADER_MAC_WORK_LOCAL_CAP_DEFAULT`, itself the most work the recipient-count and header-length defaults allow together) | `HeaderReadLimits::enforce_header_mac_work` | `protocol::classify_recipients_within_limits`, the one reader preflight both `protocol::DecryptSession::open` and `api::probe_recipient_mode_with_limits` call, so the file is refused before any private-key unlock, KDF, or header MAC — and so a probe cannot classify a file the decrypt path would refuse | `protocol::preflight_header_write_limits` (counts every entry, since the reader cannot know which will unwrap until after that work) |
+| Aggregate header-MAC input (resource cap) — `supported_recipient_count × (PREFIX_SIZE + header_len)`, the product the three per-dimension caps above leave unbounded | `HeaderReadLimits::HEADER_MAC_WORK_BYTES_DEFAULT` (= `format::HEADER_MAC_WORK_LOCAL_CAP_DEFAULT`, itself the most work the recipient-count and header-length defaults allow together) | `HeaderReadLimits::enforce_header_mac_work` | `protocol::classify_recipients_within_limits`, the one reader preflight that decryption, `Decryptor::open`, and `api::probe_recipient_mode_with_limits` all reach through `protocol::DecryptSession::from_file`, so the file is refused before any private-key unlock, key agreement, KDF, or header MAC — and so a probe cannot classify a file the decrypt path would refuse | `protocol::preflight_header_write_limits` (counts every entry, since the reader cannot know which will unwrap until after that work) |
 | `header_fixed` structural rules (`header_flags == 0`, `1 <= recipient_count <= MAX`, `ext_len <= MAX`, `entries_len + ext_len + HEADER_FIXED_SIZE == header_len`) | `format::check_*` private helpers + `format::EXT_LEN_MAX` / `RECIPIENT_COUNT_MAX` | `HeaderFixed::validate_structural` | `HeaderFixed::parse` (after wire-byte parse) | `container::build_encrypted_header` (after constructing the `HeaderFixed` value from typed inputs) |
 | Argon2id structural rules (`lanes ∈ [1, MAX_LANES]`, `time_cost ∈ [1, MAX_TIME_COST]`, `mem_cost ∈ [ARGON2_MIN_MEM_COST_PER_LANE × lanes, MAX_MEM_COST]`) | `KdfParams::MAX_*` constants + `crypto::kdf::ARGON2_MIN_MEM_COST_PER_LANE` | `KdfParams::validate_structural` | `KdfParams::from_bytes_structural` (after wire-byte parse) | `KdfParams::validate_for_write` (called from `protocol::encrypt` via `RecipientScheme::validate_for_write`, and from `protocol::generate_key_pair`; run early by `Encryptor::write` / `KeyPairGenerator::write`) |
 | Argon2id `mem_cost` (resource cap, on top of structural) | `KdfLimit::MEM_COST_KIB_DEFAULT` (= `KdfParams::DEFAULT_MEM_COST`) / `KdfLimit::default()` | `KdfParams::enforce_limit` | `KdfParams::from_bytes` (calls `enforce_limit` after structural parse) | `KdfParams::validate_for_write` (calls `enforce_limit` after `validate_structural`) |
@@ -1506,15 +1506,22 @@ Dependency rules:
 
 Decryption must preserve this order:
 
-1. Read prefix.
-2. Reject bad magic, version, kind, flags, or header length.
-3. Read header and header MAC.
-4. Structurally parse header and recipient entries.
-5. Reject unknown critical recipients for every entry, then malformed flags and
-   wrong native body lengths for every entry, then illegal mixing. Each pass
-   covers the whole recipient list before the next one starts.
-6. Apply local resource caps, including the aggregate header-MAC bound on the
-   supported recipient count multiplied by the header size.
+1. Read the prefix; an input too short for it is truncated.
+2. Reject bad magic, a wrong kind, version byte `0x00` as malformed, an
+   unsupported nonzero version, nonzero flags, or a header length over the
+   structural maximum, in the `FORMAT.md` §3.1 order.
+3. Reject a header length over the local cap, then read the header and the
+   header MAC; an input that ends before either is complete is truncated.
+4. Structurally parse the header and the recipient entries, applying the
+   recipient-count and recipient-body caps and rejecting reserved recipient
+   flag bits.
+5. Reject unknown critical recipients, then native entries with nonzero flags
+   or a wrong body length, then failing recipient-specific body checks
+   (`argon2id` KDF parameters, `x25519` ephemeral keys), then illegal mixing.
+   Each pass covers the whole recipient list before the next one starts.
+6. Apply the aggregate header-MAC bound on the supported recipient count
+   multiplied by the header size. The KDF caps apply later, right before each
+   KDF runs.
 7. Attempt supported recipient entries. No private-key unlock, KDF, or key
    agreement may run before step 6 completes.
 8. Verify header MAC with each candidate `FileKey`.

@@ -578,8 +578,8 @@ pub enum CryptoError {
     /// [`crate::HeaderReadLimits::max_header_mac_work_bytes`] for files
     /// from a known origin that legitimately combine many recipients
     /// with a large header. Readers report it before any private-key
-    /// unlock, KDF, or MAC work, and writers before sealing, so neither
-    /// side can be made to do that work by the file itself.
+    /// unlock, key agreement, KDF, or MAC work, and writers before sealing,
+    /// so neither side can be made to do that work by the file itself.
     #[error("Recipient verification work too large ({work_bytes} bytes, limit {local_cap})")]
     HeaderMacWorkCapExceeded {
         /// Total header bytes all candidate recipients would authenticate.

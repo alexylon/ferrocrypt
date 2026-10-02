@@ -407,8 +407,10 @@ impl std::fmt::Debug for ParsedEncryptedHeader {
 /// Performs zero cryptographic work. All cap rejections fire before any
 /// large allocation is committed:
 ///
-/// 1. read 12-byte prefix → [`Prefix::parse`] (BadMagic / WrongKind /
-///    UnsupportedVersion / MalformedHeader / OversizedHeader);
+/// 1. read the 12-byte prefix, reporting a shorter input as
+///    [`FormatDefect::Truncated`] before its magic is checked, then
+///    [`Prefix::parse`] it (BadMagic / WrongKind / UnsupportedVersion /
+///    MalformedHeader / OversizedHeader);
 /// 2. enforce `prefix.header_len <= limits.max_header_len`;
 /// 3. read the entire `header_len`-byte `header` region into one buffer;
 /// 4. read the 32-byte header MAC tag into a fixed-size buffer. Steps 3
@@ -443,7 +445,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
     // Per `FORMAT.md` §3.7 step 3, the MAC-tag read is a framing read:
     // it must complete, or fail as `Truncated`, before structural parsing
     // starts. Otherwise a file that omits the MAC bytes could surface as
-    // `MalformedHeader` and hide the simpler "file is truncated" diagnostic.
+    // `MalformedHeader` instead of `Truncated`.
     let mut header_mac = [0u8; HEADER_MAC_SIZE];
     read_exact_or_truncated(reader, &mut header_mac)?;
 
@@ -1675,9 +1677,8 @@ mod tests {
     /// If a file's `header` region is structurally malformed AND the
     /// MAC tag is missing, the framing-level `Truncated` diagnostic must
     /// fire before the structural `MalformedHeader` defect. Otherwise the
-    /// reader would surface the downstream parse error and hide the
-    /// simpler "file is truncated" cause, contradicting `FORMAT.md`
-    /// §3.7 step 3.
+    /// reader would report the downstream parse error instead,
+    /// contradicting `FORMAT.md` §3.7 step 3.
     #[test]
     fn read_returns_truncated_before_structural_error_when_mac_missing() {
         let DerivedSubkeys {

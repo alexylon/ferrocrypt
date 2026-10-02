@@ -2,9 +2,9 @@
 
 **Status:** populated. `SUITE-VERSION` tracks the corpus revision so
 readers can pin to a specific one. Unlike `testvectors/wire/` (frozen
-forever once it ships with stable release 0.3.0), fixtures here
-**may** be added, corrected, or extended in any release; each such
-change bumps `SUITE-VERSION`.
+forever once it ships with stable release 0.3.0), fixtures and their
+manifest rows **may** be added, corrected, or extended in any release;
+each such change bumps `SUITE-VERSION`.
 
 Like `testvectors/wire/`, this directory serves independent reader
 implementations — a different role from `tests/fixtures/`, which is an
@@ -15,7 +15,7 @@ internal regeneratable regression net for this codebase.
 ```
 testvectors/suite/
 ├── README.md          ← this file
-├── SUITE-VERSION      ← corpus revision, bumped on any fixture change
+├── SUITE-VERSION      ← corpus revision, bumped on any fixture or manifest change
 ├── plaintext.txt      ← source file every valid fixture encrypts
 ├── manifest.tsv       ← one row per attempt: file, action, credential,
 │                        expected outcome
@@ -157,9 +157,10 @@ leaving an empty diff. Existing fixture bytes also remain stable when
 new RNG-consuming fixtures are appended without changing the earlier
 draw order.
 
-Increment `SUITE_VERSION` whenever a fixture is added, removed, or
-changed. The constant is the source of truth: regeneration writes its
-value to `SUITE-VERSION`, so do not edit the committed file directly.
+Increment `SUITE_VERSION` whenever a fixture or a manifest row is
+added, removed, or changed. The constant is the source of truth:
+regeneration writes its value to `SUITE-VERSION`, so do not edit the
+committed file directly.
 
 `tests/testvector_suite.rs` replays the full manifest through the
 public API on every `cargo test` run, so a drift between the committed

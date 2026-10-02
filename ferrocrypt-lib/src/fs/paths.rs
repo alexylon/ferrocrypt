@@ -416,8 +416,8 @@ mod tests {
     }
 
     /// A head shorter than `head_len` is handed back as read, for the
-    /// caller to report as a truncated file, and `remaining_len` never sees
-    /// it: a caller may index its whole head.
+    /// caller to classify, and `remaining_len` never sees it: a caller
+    /// may index its whole head.
     #[test]
     fn read_file_staged_returns_a_short_head_as_read() {
         let (_dir, path) = write_temp(b"ab");

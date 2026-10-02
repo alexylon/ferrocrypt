@@ -335,6 +335,8 @@ Common failure categories include:
 - **Decryption failed: file header was modified or corrupted** — a candidate file key was recovered (from a passphrase or a recipient key), but the authenticated header did not verify.
 - **Decryption failed: no supported recipient** — the file uses a recipient type this release does not support.
 - **Decryption failed: file data was modified or corrupted** — the header verified, but the encrypted payload was modified or corrupted.
+- **Not a FerroCrypt file** — the file does not begin with the FerroCrypt signature: it is not a FerroCrypt file, or its first bytes were damaged.
+- **File is too short to be read as a FerroCrypt file** — the file ends before the header in front of the encrypted data is complete. It was cut off, a damaged length field declares more bytes than the file holds, or it is not a FerroCrypt file.
 - **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
 - **Encrypted payload stream is malformed** — every payload chunk passed authentication, but the chunk sequence violates the format. FerroCrypt does not write this layout.

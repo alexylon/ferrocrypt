@@ -74,11 +74,10 @@ pub(crate) fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
 
 /// Reads exactly `buf.len()` bytes from `reader`, mapping `UnexpectedEof`
 /// to [`FormatDefect::Truncated`] and forwarding every other `io::Error`
-/// as [`CryptoError::Io`]. Used by `.fcr` decrypt paths where a short read
-/// on a fixed-size header field is a format-level truncation, but a real
+/// as [`CryptoError::Io`]. Used by the `.fcr` prefix, header, and header
+/// MAC reads, where input that ends early is a format defect, but a real
 /// I/O failure (e.g. `PermissionDenied`) must surface unchanged so the
-/// caller can distinguish "file is corrupted" from "filesystem is
-/// misbehaving".
+/// caller can tell a short file from a failing filesystem.
 pub(crate) fn read_exact_or_truncated(
     reader: &mut impl Read,
     buf: &mut [u8],
@@ -576,8 +575,8 @@ fn check_header_len(header_len: u32) -> Result<(), CryptoError> {
 /// Per `FORMAT.md` §3.7 step 1–2, this fires before any cryptographic
 /// operation runs. `UnexpectedEof` surfaces as
 /// [`FormatDefect::Truncated`]; other I/O errors surface as
-/// [`CryptoError::Io`] so downstream callers can distinguish "the file
-/// is malformed" from "we couldn't read it."
+/// [`CryptoError::Io`], so a caller can tell a malformed file from one it
+/// could not read.
 pub(crate) fn read_prefix_from_reader(
     reader: &mut impl Read,
     expected_kind: Kind,

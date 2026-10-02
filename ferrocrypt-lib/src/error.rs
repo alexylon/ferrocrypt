@@ -956,7 +956,15 @@ pub enum CryptoError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FormatDefect {
-    /// Input ended before a complete field or header could be read.
+    /// The input ended before the 12-byte `.fcr` prefix, the header the
+    /// prefix declares, or the 32-byte header MAC was complete, whether it
+    /// was cut short or a damaged `header_len` declares more than it holds.
+    /// [`Decryptor::open`](crate::Decryptor::open) and decryption report an
+    /// input shorter than the prefix this way whatever bytes it holds, so it
+    /// need not be a FerroCrypt file; [`probe_recipient_mode`](crate::probe_recipient_mode)
+    /// returns `None` for one without the magic instead. A key file or an
+    /// encrypted payload that ends early reports its own error, such as
+    /// [`CryptoError::PayloadTruncated`].
     Truncated,
     /// Leading magic bytes do not match `"FCR\0"`.
     BadMagic,
@@ -1080,7 +1088,7 @@ pub enum FormatDefect {
 impl std::fmt::Display for FormatDefect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Truncated => f.write_str("File is truncated or corrupted"),
+            Self::Truncated => f.write_str("File is too short to be read as a FerroCrypt file"),
             Self::BadMagic => f.write_str("Not a FerroCrypt file"),
             Self::ExtTooLarge { len } => {
                 write!(f, "Extension region is too large ({len} bytes)")
@@ -1555,7 +1563,7 @@ mod tests {
     fn typed_format_variants_display_exact_strings() {
         assert_eq!(
             FormatDefect::Truncated.to_string(),
-            "File is truncated or corrupted"
+            "File is too short to be read as a FerroCrypt file"
         );
         assert_eq!(FormatDefect::BadMagic.to_string(), "Not a FerroCrypt file");
         assert_eq!(

@@ -1233,11 +1233,12 @@ fn write_manifest(suite: &Path, rows: &[Case]) {
 const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 
 /// Corpus revision written to `SUITE-VERSION`. Independent readers may pin
-/// to a specific revision. Increment it whenever a fixture is added, removed,
-/// or changed; different corpus contents must never share a revision.
+/// to a specific revision. Increment it whenever a fixture or a manifest row
+/// is added, removed, or changed; different corpus contents must never share
+/// a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 13;
+const SUITE_VERSION: u32 = 14;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1407,13 +1408,13 @@ fn regenerate_suite_vectors_inner() {
         "cases/header-truncated.fcr",
         "-",
         "InvalidFormat(Truncated)",
-        "File is truncated or corrupted",
+        "File is too short to be read as a FerroCrypt file",
     ));
     rows.push(Case::err(
         "cases/prefix-undersized-header-no-mac.fcr",
         "-",
         "InvalidFormat(Truncated)",
-        "File is truncated or corrupted",
+        "File is too short to be read as a FerroCrypt file",
     ));
     rows.push(Case::err(
         "cases/prefix-undersized-header-with-mac.fcr",

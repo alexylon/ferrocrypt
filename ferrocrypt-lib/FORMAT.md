@@ -3106,6 +3106,13 @@ reused operationally.
 | FCA content and extraction | Exact file contents, short content, trailing content, unsafe or unsupported entries, and representative extraction rejection classes without unsafe final output |
 | Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
 
+Where a row asks for files that fix the order of every two checks, two checks
+count only when their order can decide a report. If every file that breaks both
+also breaks a check ordered between them that reports the class of the earlier
+one, the row counts that check and the later one instead: a reader that makes
+that check before the later one reports the same class whichever of the two it
+makes first, so no file tells those two orders apart.
+
 Every local cap is evidenced from both sides, each under a limit profile that
 brings it within reach: an artifact one unit past the cap is refused and one
 sitting exactly on it is accepted, so a reader that places the cap one unit

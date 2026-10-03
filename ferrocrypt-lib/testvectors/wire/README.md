@@ -261,24 +261,32 @@ reader walking the entries either way meets the mixing rules and the cap first
 and must still report the defect's check. A body over the default cap reports
 the class of the work cap, so `walk-order-body-cap-before-mixing` runs under the
 default caps, where it breaks the mixing rules alone. Together the cases fix the
-order of every two checks that report different classes and that one file can
-break together, with a step whose outcomes differ in class, such as the version,
-counted as one check per class. FerroCrypt's own tests check this claim for the
-`.fcr` checks against the committed corpus, also for a reader that, before the
-check that guards the end it passes, reads `header_fixed` past the declared
-header, takes the recipient-entry region from any length the header declares or
-from the declared header alone, or reads an entry past that region. Only a pair
-with a check that a capability changes rests on a capability-relative case, so a
-reader that declares capabilities, one or several, loses only such pairs. The
-unknown recipient type and the extension tags the order cases use are test
-values (`FORMAT.md` §3.3.1, §6), which no reader implements, so the only
-capabilities that touch the order cases are newer stored versions. The
-header-MAC work cap follows every check of `FORMAT.md` §3.7 steps 1 to 9 and
-comes before the private-key unlock and before any recipient is tried.
-`header-mac-work-order-mixing-before-cap` puts it after the mixing rules with an
-`argon2id` entry between two `x25519` entries, either of which alone crosses the
-cap, and so, through the order the step-8 cases already fix, after every
-recipient check. `header-mac-work-order-cap-before-passphrase-unwrap`,
+order of every two checks that report different classes, that one file can break
+together, and whose order can decide a report (`FORMAT.md` §12.3), with a step
+whose outcomes differ in class, such as the version, counted as one check per
+class. FerroCrypt's own tests check this claim against the committed corpus. For
+the `.fcr` checks they also check it for a reader that, before the check that
+guards the end it passes, reads `header_fixed` past the declared header, takes
+the recipient-entry region from any length the header declares or from the
+declared header alone, or reads an entry past that region. For the key files
+they check it through each `private.key` reader, and also for a reader that
+decodes a recipient string §7 step 4 refuses, takes the internal checksum from
+the end of the payload with the key material it declares or with every byte
+before that checksum, reads no further than one byte past the longest valid
+file, past the lengths a `private.key` header declares, or past a fixed header
+that breaks a check of §8 steps 0 to 7, or of steps 0 to 9, takes every byte
+after `ext_bytes` as the wrapped secret, or judges the support of a type name
+that breaks the grammar. Only a pair with a check that a capability changes
+rests on a capability-relative case, so a reader that declares capabilities, one
+or several, loses only such pairs. The unknown recipient type and the extension
+tags the order cases use are test values (`FORMAT.md` §3.3.1, §6), which no
+reader implements, so the only capabilities that touch the order cases are newer
+stored versions. The header-MAC work cap follows every check of `FORMAT.md` §3.7
+steps 1 to 9 and comes before the private-key unlock and before any recipient is
+tried. `header-mac-work-order-mixing-before-cap` puts it after the mixing rules
+with an `argon2id` entry between two `x25519` entries, either of which alone
+crosses the cap, and so, through the order the step-8 cases already fix, after
+every recipient check. `header-mac-work-order-cap-before-passphrase-unwrap`,
 `header-mac-work-order-cap-before-private-key-unlock`,
 `header-mac-work-order-cap-before-x25519-shared-secret`,
 `header-mac-work-order-cap-before-x25519-unwrap`, and

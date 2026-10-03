@@ -431,7 +431,7 @@ pub fn subject_version(subject: &str) -> Option<u8> {
 
 /// The tag a TLV namespace subject names: `0x` and four uppercase hexadecimal
 /// digits.
-fn subject_tag(subject: &str) -> Option<u16> {
+pub fn subject_tag(subject: &str) -> Option<u16> {
     hex_subject(subject, 2 * size_of::<u16>()).and_then(|tag| u16::try_from(tag).ok())
 }
 

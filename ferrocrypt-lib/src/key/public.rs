@@ -102,8 +102,9 @@ pub(crate) const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
 pub(crate) const PAYLOAD_HEADER_SIZE: usize = 1 + size_of::<u16>() + size_of::<u32>();
 
 pub(crate) const PAYLOAD_VERSION_OFFSET: usize = 0;
-const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = PAYLOAD_VERSION_OFFSET + 1;
-const PAYLOAD_KEY_MATERIAL_LEN_OFFSET: usize = PAYLOAD_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+pub(crate) const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = PAYLOAD_VERSION_OFFSET + 1;
+pub(crate) const PAYLOAD_KEY_MATERIAL_LEN_OFFSET: usize =
+    PAYLOAD_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
 const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYLOAD_HEADER_SIZE);
 
 /// Spec maximum for the recipient string length in ASCII characters
@@ -284,7 +285,7 @@ fn typed_payload(
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
     let key_material_len = u32::try_from(key_material.len()).map_err(|_| malformed_public_key())?;
 
-    let cs = compute_checksum(version, type_name, key_material);
+    let cs = compute_checksum(version, type_name_bytes, key_material);
 
     let total_data =
         PAYLOAD_HEADER_SIZE + type_name_bytes.len() + key_material.len() + PUBLIC_KEY_CHECKSUM_SIZE;
@@ -516,7 +517,7 @@ pub fn decode_recipient_string(
     let key_material = data[type_name_end..key_material_end].to_vec();
     let stored_checksum = &data[key_material_end..checksum_end];
 
-    let computed_checksum = compute_checksum(wire_version, type_name, &key_material);
+    let computed_checksum = compute_checksum(wire_version, type_name_bytes, &key_material);
     // The recipient string is public, the checksum is for typo
     // detection rather than secret-comparison; ordinary `!=` is fine
     // and timing-safety is not required here.
@@ -690,12 +691,12 @@ fn check_total_payload_size(
 /// `0x00` between `type_name` and `key_material` is unambiguous as a
 /// separator because the §3.3 `type_name` grammar disallows the null
 /// byte.
-fn public_key_hash(prefix: &[&[u8]], type_name: &str, key_material: &[u8]) -> [u8; 32] {
+fn public_key_hash(prefix: &[&[u8]], type_name: &[u8], key_material: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     for chunk in prefix {
         hasher.update(chunk);
     }
-    hasher.update(type_name.as_bytes());
+    hasher.update(type_name);
     hasher.update([0x00]);
     hasher.update(key_material);
     hasher.finalize().into()
@@ -711,10 +712,10 @@ fn public_key_hash(prefix: &[&[u8]], type_name: &str, key_material: &[u8]) -> [u
 /// fields but a different version byte fails this check. Detects typed-payload
 /// corruption that the outer Bech32 checksum cannot catch (for example, a
 /// hand-edited recipient string with a valid Bech32 checksum but mismatched
-/// inner data).
-fn compute_checksum(
+/// inner data). Defined over the raw bytes of `type_name`.
+pub(crate) fn compute_checksum(
     version: u8,
-    type_name: &str,
+    type_name: &[u8],
     key_material: &[u8],
 ) -> [u8; PUBLIC_KEY_CHECKSUM_SIZE] {
     let full = public_key_hash(
@@ -774,7 +775,7 @@ pub(crate) fn fingerprint_bytes(
     key_material: &[u8],
 ) -> Result<[u8; 32], CryptoError> {
     check_x25519_material(type_name, key_material)?;
-    Ok(public_key_hash(&[], type_name, key_material))
+    Ok(public_key_hash(&[], type_name.as_bytes(), key_material))
 }
 
 /// 64-character lowercase hex of [`fingerprint_bytes`].
@@ -1390,7 +1391,7 @@ mod tests {
         // downstream is exactly the variant-confusion bug `Bech32V1` is
         // here to prevent.
         let key = x25519_key();
-        let cs = compute_checksum(PUBLIC_KEY_VERSION, "x25519", &key);
+        let cs = compute_checksum(PUBLIC_KEY_VERSION, b"x25519", &key);
         let mut data = Vec::new();
         data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
@@ -1533,7 +1534,7 @@ mod tests {
         // validate_type_name_grammar (uppercase). Compute the inner checksum
         // for "X25519" first so the only thing left to fail is grammar.
         let key = x25519_key();
-        let cs = compute_checksum(PUBLIC_KEY_VERSION, "X25519", &key);
+        let cs = compute_checksum(PUBLIC_KEY_VERSION, b"X25519", &key);
         let mut data = Vec::new();
         data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());

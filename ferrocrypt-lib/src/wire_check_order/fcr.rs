@@ -3,22 +3,21 @@
 //! aggregate header-MAC cap, and the checks a credential decides, which the
 //! claim covers only against the cap.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ferrocrypt_test_support::wire_manifest::{
-    CAP_COLUMN_PREFIX, FCA_ARCHIVE_TLV_DOMAIN, FCA_ENTRY_TLV_DOMAIN, FCA_VERSION_DOMAIN,
-    KEY_TYPE_DOMAIN, OUTER_TLV_DOMAIN, OUTER_VERSION_DOMAIN, PRIVATE_KEY_TLV_DOMAIN,
-    PRIVATE_KEY_VERSION_DOMAIN, PUBLIC_KEY_VERSION_DOMAIN, RECIPIENT_TYPE_DOMAIN, capability_parts,
-    field, limit_value, subject_version, table_columns,
+    FCA_ARCHIVE_TLV_DOMAIN, FCA_ENTRY_TLV_DOMAIN, FCA_VERSION_DOMAIN, KEY_TYPE_DOMAIN,
+    OUTER_TLV_DOMAIN, OUTER_VERSION_DOMAIN, PRIVATE_KEY_TLV_DOMAIN, PRIVATE_KEY_VERSION_DOMAIN,
+    PUBLIC_KEY_VERSION_DOMAIN, RECIPIENT_TYPE_DOMAIN, capability_parts, field, subject_version,
 };
 use zeroize::Zeroizing;
 
 use super::{
-    CheckList, Direction, Evidence, Reach, Row, Span, corpus_root, limit_profiles, open_among,
-    open_pairs, rejected_cases, stray_losses,
+    Breaks, CheckList, Direction, Evidence, LoadedCase, ProfileCaps, Reach, ReaderCapabilities,
+    Row, Span, corpus_root, limit_profiles, open_pairs, over_kdf_cap, rejected_cases, reopens,
+    stray_losses, type_name_grammar_breaks,
 };
 use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{FILE_KEY_SIZE, FileKey, derive_subkeys};
@@ -38,11 +37,11 @@ use crate::recipient::entry::{
     ENTRY_BODY_LEN_OFFSET, ENTRY_HEADER_SIZE, ENTRY_RECIPIENT_FLAGS_OFFSET,
     ENTRY_TYPE_NAME_LEN_OFFSET, RECIPIENT_FLAG_CRITICAL, RecipientEntry,
 };
-use crate::recipient::name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
+use crate::recipient::name::TYPE_NAME_MAX_LEN;
 use crate::recipient::native::{argon2id, x25519};
 use crate::recipient::policy::{NativeRecipientType, enforce_recipient_mixing_policy};
 use crate::wire_vector_gen::{CorpusCredential, WALK_ORDER_CASE_PREFIX, read_credential};
-use crate::{CryptoError, FormatDefect, HeaderReadLimits, KeyReadLimits};
+use crate::{CryptoError, FormatDefect};
 
 /// One check of the `.fcr` list, in the order the specification fixes.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -387,10 +386,11 @@ struct Capabilities {
     recipient_types: BTreeSet<String>,
 }
 
-impl Capabilities {
-    /// The capabilities a reader declaring every capability of `run` has, and
-    /// the checks of this list they change. A capability no check here reads,
-    /// such as an FCA archive version inside the payload, changes none.
+impl ReaderCapabilities for Capabilities {
+    type Check = Fcr;
+
+    /// A capability no check of this list reads, such as an FCA archive
+    /// version inside the payload, changes none.
     fn declaring(run: &[String]) -> (Self, BTreeSet<Fcr>) {
         let mut capabilities = Self::default();
         let mut changed = BTreeSet::new();
@@ -432,7 +432,9 @@ impl Capabilities {
         }
         (capabilities, changed)
     }
+}
 
+impl Capabilities {
     fn supports(&self, type_name: &[u8]) -> bool {
         native_type(type_name).is_some()
             || std::str::from_utf8(type_name).is_ok_and(|name| self.recipient_types.contains(name))
@@ -449,101 +451,6 @@ fn native_type(type_name: &[u8]) -> Option<NativeRecipientType> {
 /// A check an artifact breaks, with the recipient entry it breaks on when the
 /// check is made once per entry.
 type Break = (Fcr, Option<usize>);
-
-/// The checks an artifact breaks.
-#[derive(Clone, Default)]
-struct Breaks {
-    /// Broken for every reader that makes the check first.
-    certain: BTreeSet<Break>,
-    /// Broken for some such readers only.
-    uncertain: BTreeSet<Break>,
-    /// Where readers that make a check on the entries met so far first meet
-    /// it.
-    reach: BTreeMap<Fcr, Reach>,
-    /// The checks a credential breaks on whichever entry a reader tries
-    /// first.
-    first_try: BTreeSet<Fcr>,
-}
-
-impl Breaks {
-    /// One artifact under several readings: a check every reading breaks for
-    /// certain stays certain, and any other check a reading breaks is
-    /// uncertain. For a check made on the entries met so far, the earliest
-    /// stop is the earliest over the readings and the latest stop the latest
-    /// over them, or none when some reading never meets the check.
-    fn merge(readings: impl IntoIterator<Item = Breaks>) -> Breaks {
-        let readings: Vec<Breaks> = readings.into_iter().collect();
-        let certain = in_every(readings.iter().map(|reading| reading.certain.clone()));
-        let uncertain = readings
-            .iter()
-            .flat_map(|reading| reading.certain.iter().chain(&reading.uncertain))
-            .filter(|broken| !certain.contains(broken))
-            .copied()
-            .collect();
-        let reached: BTreeSet<Fcr> = readings
-            .iter()
-            .flat_map(|reading| reading.reach.keys().copied())
-            .collect();
-        let reach = reached
-            .into_iter()
-            .map(|check| {
-                let span = |direction: Direction| {
-                    let spans: Vec<Option<Span>> = readings
-                        .iter()
-                        .map(|reading| reading.reach.get(&check).map(|r| r.toward(direction)))
-                        .collect();
-                    let earlier = |a, b| if direction.meets_before(b, a) { b } else { a };
-                    let later = |a, b| if direction.meets_before(a, b) { b } else { a };
-                    Span {
-                        first: spans
-                            .iter()
-                            .flatten()
-                            .map(|span| span.first)
-                            .reduce(earlier)
-                            .expect("a reading reaches the check"),
-                        last: spans
-                            .iter()
-                            .map(|span| span.and_then(|span| span.last))
-                            .collect::<Option<Vec<usize>>>()
-                            .and_then(|lasts| lasts.into_iter().reduce(later)),
-                    }
-                };
-                let reach = Reach {
-                    front_to_back: span(Direction::FrontToBack),
-                    back_to_front: span(Direction::BackToFront),
-                };
-                (check, reach)
-            })
-            .collect();
-        let first_try = in_every(readings.iter().map(|reading| reading.first_try.clone()));
-        Breaks {
-            certain,
-            uncertain,
-            reach,
-            first_try,
-        }
-    }
-
-    /// The checks a case that stores `class` counts: every certain one, and
-    /// an uncertain one only when it reports `class`.
-    fn counted(&self, class: &str) -> Vec<Break> {
-        self.certain
-            .iter()
-            .chain(
-                self.uncertain
-                    .iter()
-                    .filter(|(check, _)| FcrList::class(*check) == class),
-            )
-            .copied()
-            .collect()
-    }
-}
-
-/// The members every one of `sets` holds.
-fn in_every<T: Ord + Copy>(sets: impl Iterator<Item = BTreeSet<T>>) -> BTreeSet<T> {
-    sets.reduce(|a, b| a.intersection(&b).copied().collect())
-        .unwrap_or_default()
-}
 
 /// Where a reader takes the recipient-entry region to end. The declared
 /// lengths can disagree, so a reader may take the end from any of them.
@@ -647,7 +554,7 @@ fn structural_breaks(
     profile: &Row,
     capabilities: &Capabilities,
     reading: Reading,
-) -> (Breaks, Walk) {
+) -> (Breaks<Fcr>, Walk) {
     let mut certain = BTreeSet::new();
     let mut uncertain = BTreeSet::new();
     let n = bytes.len();
@@ -979,18 +886,14 @@ fn walk_region(
         let name_start = offset + ENTRY_HEADER_SIZE;
         let name_end = name_start + usize::from(type_name_len);
         let type_name = held.get(name_start..name_end).map(<[u8]>::to_vec);
-        let ungrammatical = |name: &[u8]| {
-            !std::str::from_utf8(name).is_ok_and(|name| validate_type_name_grammar(name).is_ok())
-        };
-        if type_name.as_deref().is_some_and(ungrammatical) {
-            // Outside 1..=255 bytes, a name breaks the grammar for a reader
-            // whose grammar check repeats the length rule; its characters are
-            // not judged apart.
-            if (1..=TYPE_NAME_MAX_LEN).contains(&usize::from(type_name_len)) {
+        match type_name.as_deref().and_then(type_name_grammar_breaks) {
+            Some(true) => {
                 certain.insert((TypeNameGrammar, Some(index)));
-            } else {
+            }
+            Some(false) => {
                 uncertain.insert((TypeNameGrammar, Some(index)));
             }
+            None => {}
         }
         let body_end = name_end.saturating_add(body_len as usize);
         let body = held
@@ -1048,7 +951,7 @@ enum Opened {
 /// What a credential decides about a file under one reading.
 enum Decided {
     /// The checks of this list the credential breaks.
-    Breaks(Breaks),
+    Breaks(Breaks<Fcr>),
     /// The reader refuses the supplied private key, for the stated reason, by
     /// a check this list does not hold.
     KeyRefused(String),
@@ -1061,22 +964,6 @@ enum Tried {
     Refused,
     /// An `x25519` key agreement with the all-zero shared secret.
     ZeroSharedSecret,
-}
-
-/// Whether KDF parameters are above a profile's KDF caps, judged on the
-/// numbers alone, as a reader that applies the caps before the §2.2 bounds
-/// would.
-fn over_kdf_cap(params: KdfParams, kdf_limit: &KdfLimit) -> bool {
-    match params.enforce_limit(Some(kdf_limit)) {
-        Ok(_) => false,
-        Err(
-            CryptoError::KdfResourceCapExceeded { .. }
-            | CryptoError::KdfTimeCostCapExceeded { .. }
-            | CryptoError::KdfLanesCapExceeded { .. }
-            | CryptoError::KdfWorkCapExceeded { .. },
-        ) => true,
-        Err(other) => panic!("the KDF caps refuse parameters for another reason: {other:?}"),
-    }
 }
 
 /// The KDF parameters the bytes of an `argon2id` body store, read without the
@@ -1362,68 +1249,6 @@ fn header_mac_verifies(bytes: &[u8], candidates: &[FileKey]) -> Option<bool> {
     }))
 }
 
-/// The caps of a limit profile, read through the builders that clamp a
-/// reader's caps. Every cap column read is recorded, so a test can tell which
-/// columns this list reads.
-struct ProfileCaps<'a> {
-    profile: &'a Row,
-    read: RefCell<BTreeSet<String>>,
-}
-
-impl<'a> ProfileCaps<'a> {
-    fn new(profile: &'a Row) -> Self {
-        Self {
-            profile,
-            read: RefCell::new(BTreeSet::new()),
-        }
-    }
-
-    fn cap(&self, column: &str) -> u64 {
-        self.read.borrow_mut().insert(column.to_string());
-        limit_value(self.profile, column)
-    }
-
-    fn narrow<T: TryFrom<u64>>(&self, column: &str) -> T {
-        T::try_from(self.cap(column))
-            .unwrap_or_else(|_| panic!("{column}: the cap does not fit its type"))
-    }
-
-    fn header(&self) -> HeaderReadLimits {
-        HeaderReadLimits::default()
-            .max_header_len(self.narrow("max_header_len"))
-            .max_recipient_count(self.narrow("max_recipient_count"))
-            .max_recipient_body_len(self.narrow("max_recipient_body_len"))
-            .max_header_mac_work_bytes(self.cap("max_header_mac_work_bytes"))
-    }
-
-    fn kdf(&self) -> KdfLimit {
-        KdfLimit::new(self.narrow("max_kdf_mem_kib"))
-            .max_time_cost(self.narrow("max_kdf_time"))
-            .max_lanes(self.narrow("max_kdf_lanes"))
-            .max_work(self.cap("max_kdf_work"))
-    }
-
-    fn key_read(&self) -> KeyReadLimits {
-        KeyReadLimits::default()
-            .max_recipient_string_chars(self.narrow("max_recipient_string_chars"))
-            .max_private_key_wrapped_secret_len(self.narrow("max_private_key_wrapped_secret_len"))
-    }
-}
-
-/// The cap columns of a limit profile this list leaves alone: the archive
-/// caps, which only the payload meets.
-const CAP_COLUMNS_UNREAD: [&str; 9] = [
-    "max_entry_count",
-    "max_total_plaintext_bytes",
-    "max_path_depth",
-    "max_path_bytes",
-    "max_manifest_bytes",
-    "max_archive_ext_bytes",
-    "max_entry_ext_bytes",
-    "max_total_entry_ext_bytes",
-    "max_tlv_value_bytes",
-];
-
 /// The checks this list can still judge on a file of a newer outer-container
 /// version that a reader supports: the magic and the kind keep their places,
 /// while the prefix length and all the file holds past its kind may differ.
@@ -1443,7 +1268,7 @@ fn case_breaks(
     bytes: &[u8],
     profile: &Row,
     capabilities: &Capabilities,
-) -> (Breaks, BTreeSet<Vec<u8>>) {
+) -> (Breaks<Fcr>, BTreeSet<Vec<u8>>) {
     let newer_version = bytes
         .get(PREFIX_VERSION_OFFSET)
         .is_some_and(|version| capabilities.outer_versions.contains(version));
@@ -1484,13 +1309,7 @@ fn case_breaks(
             Decided::KeyRefused(refusal) => Some(refusal),
         };
         if newer_version {
-            let (known, unknown) = std::mem::take(&mut breaks.certain)
-                .into_iter()
-                .partition(|(check, _)| KEPT_BY_NEWER_VERSIONS.contains(check));
-            breaks.certain = known;
-            breaks.uncertain.extend(unknown);
-            breaks.reach.clear();
-            breaks.first_try.clear();
+            breaks.as_newer_version(&KEPT_BY_NEWER_VERSIONS);
         }
         // §3.7 leaves the checks §8 makes on a supplied private key before its
         // unlock unordered against the `.fcr` checks, and this list holds none
@@ -1534,23 +1353,15 @@ fn library_accepts_header(bytes: &[u8], profile: &Row) -> bool {
         .is_ok()
 }
 
-/// A rejected `.fcr` case, with the checks its artifact breaks for a reader
-/// that declares each run of capabilities, the empty run included, that does
-/// not hold the capability the case rests on.
-struct LoadedCase {
-    row: Row,
-    breaks: BTreeMap<Vec<String>, Breaks>,
-}
-
 /// Every rejected `.fcr` case of the committed corpus, evaluated once per test
 /// run.
-fn loaded_cases() -> &'static [LoadedCase] {
-    static CASES: OnceLock<Vec<LoadedCase>> = OnceLock::new();
+fn loaded_cases() -> &'static [LoadedCase<Fcr>] {
+    static CASES: OnceLock<Vec<LoadedCase<Fcr>>> = OnceLock::new();
     CASES.get_or_init(|| {
         let root = corpus_root().expect("the corpus is on disk");
         let profiles = limit_profiles(&root);
         let cases = rejected_cases(&root, "fcr_decrypt");
-        let runs = capability_runs(cases.iter().map(|(row, _)| row));
+        let runs = Capabilities::runs(cases.iter().map(|(row, _)| row));
         let mut credentials = Credentials {
             root,
             opened: BTreeMap::new(),
@@ -1601,92 +1412,15 @@ fn loaded_cases() -> &'static [LoadedCase] {
     })
 }
 
-/// The runs of capabilities the cases are evaluated under, each in sorted
-/// order: the empty run, then each combination of the capabilities `rows`
-/// rest on that change a check of this list, joined by every capability they
-/// rest on that changes none. Such a capability only leaves out the cases that
-/// rest on it, and leaving out more cases can only lose more, so each
-/// combination is checked where it can lose the most.
-fn capability_runs<'r>(rows: impl Iterator<Item = &'r Row>) -> Vec<Vec<String>> {
-    let declared: BTreeSet<String> = rows
-        .map(|row| field(row, "capability_id").to_string())
-        .filter(|capability| capability != "-")
-        .collect();
-    let (changing, inert): (Vec<String>, Vec<String>) =
-        declared.into_iter().partition(|capability| {
-            !Capabilities::declaring(std::slice::from_ref(capability))
-                .1
-                .is_empty()
-        });
-    let mut runs = vec![Vec::new()];
-    for members in 0..1usize << changing.len() {
-        let mut run: Vec<String> = changing
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| members & (1 << index) != 0)
-            .map(|(_, capability)| capability.clone())
-            .chain(inert.iter().cloned())
-            .collect();
-        run.sort();
-        if !run.is_empty() {
-            runs.push(run);
-        }
-    }
-    runs
-}
-
 /// The capability runs every loaded case is evaluated under.
 fn loaded_runs() -> Vec<Vec<String>> {
-    capability_runs(loaded_cases().iter().map(|case| &case.row))
+    Capabilities::runs(loaded_cases().iter().map(|case| &case.row))
 }
 
 /// The `.fcr` evidence the corpus holds for a reader that declares every
 /// capability of `run`, leaving out the cases that rest on one of them.
 fn evidence(run: &[String]) -> Vec<Evidence<Fcr>> {
-    loaded_cases()
-        .iter()
-        .filter_map(|case| {
-            let breaks = case.breaks.get(run)?;
-            let class = field(&case.row, "diagnostic_class");
-            let broken = breaks.counted(class);
-            (!broken.is_empty()).then(|| Evidence {
-                case_id: field(&case.row, "case_id").to_string(),
-                broken,
-                reach: breaks.reach.clone(),
-                class: class.to_string(),
-            })
-        })
-        .collect()
-}
-
-/// Every cap a limit profile sets is one this list reads or one only the
-/// payload meets, so a cap the corpus adds cannot go unread unnoticed.
-#[test]
-fn every_profile_cap_is_read_or_left_to_the_payload() {
-    let columns: Vec<&str> = table_columns("limit-profiles.tsv")
-        .iter()
-        .copied()
-        .filter(|column| column.starts_with(CAP_COLUMN_PREFIX))
-        .collect();
-    let profile: Row = columns
-        .iter()
-        .map(|column| (column.to_string(), "1".to_string()))
-        .collect();
-    let caps = ProfileCaps::new(&profile);
-    caps.header();
-    caps.kdf();
-    caps.key_read();
-    let read = caps.read.into_inner();
-    let unread: BTreeSet<String> = CAP_COLUMNS_UNREAD.iter().map(|c| c.to_string()).collect();
-    assert!(read.is_disjoint(&unread));
-    let known: BTreeSet<String> = read.union(&unread).cloned().collect();
-    assert_eq!(
-        known,
-        columns
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<BTreeSet<_>>()
-    );
+    super::evidence::<FcrList>(loaded_cases(), run)
 }
 
 /// The §12.3 `.fcr` check-order row holds: the cases fix every claimed pair,
@@ -1774,18 +1508,8 @@ fn leaving_out_the_witnesses_reopens_their_pair() {
         ),
     ];
     for (witnesses, pair) in witnessed {
-        let rest: Vec<Evidence<Fcr>> = base
-            .iter()
-            .filter(|evidence| !witnesses.contains(&evidence.case_id.as_str()))
-            .cloned()
-            .collect();
-        assert_eq!(
-            rest.len() + witnesses.len(),
-            base.len(),
-            "{witnesses:?} are cases of the corpus"
-        );
         assert!(
-            !open_among::<FcrList>(&rest, &[pair]).is_empty(),
+            reopens::<FcrList>(&base, witnesses, pair),
             "without {witnesses:?}, {pair:?} should be open"
         );
     }
@@ -1829,7 +1553,7 @@ fn the_corpus_fixes_the_checks_made_on_the_entries_met_so_far() {
     // Without the walk-order cases such readers remain, so the check can find
     // them.
     let walk_order =
-        |case: &LoadedCase| field(&case.row, "case_id").starts_with(WALK_ORDER_CASE_PREFIX);
+        |case: &LoadedCase<Fcr>| field(&case.row, "case_id").starts_with(WALK_ORDER_CASE_PREFIX);
     assert!(!unshown_walk_orders(&[], |case| !walk_order(case)).is_empty());
 }
 
@@ -1838,9 +1562,9 @@ fn the_corpus_fixes_the_checks_made_on_the_entries_met_so_far() {
 /// `run` kept by `kept` shows that order for.
 fn unshown_walk_orders(
     run: &[String],
-    kept: impl Fn(&LoadedCase) -> bool,
+    kept: impl Fn(&LoadedCase<Fcr>) -> bool,
 ) -> Vec<(Fcr, Fcr, Direction)> {
-    let cases: Vec<(&LoadedCase, &Breaks)> = loaded_cases()
+    let cases: Vec<(&LoadedCase<Fcr>, &Breaks<Fcr>)> = loaded_cases()
         .iter()
         .filter(|case| kept(case))
         .filter_map(|case| Some((case, case.breaks.get(run)?)))
@@ -1887,8 +1611,8 @@ fn walk_directions(check: Fcr) -> &'static [Direction] {
 /// any check a reader meets on an entry past where it meets `later`
 /// qualifies, whichever pass makes it.
 fn shows_walk_order(
-    case: &LoadedCase,
-    breaks: &Breaks,
+    case: &LoadedCase<Fcr>,
+    breaks: &Breaks<Fcr>,
     earlier: Fcr,
     later: Fcr,
     direction: Direction,
@@ -1957,7 +1681,7 @@ fn the_corpus_fixes_the_work_cap_before_the_entry_tried_first() {
     }
     for run in loaded_runs() {
         let (_, changed) = Capabilities::declaring(&run);
-        let over_cap: Vec<&Breaks> = loaded_cases()
+        let over_cap: Vec<&Breaks<Fcr>> = loaded_cases()
             .iter()
             .filter(|case| field(&case.row, "diagnostic_class") == FcrList::class(HeaderMacWorkCap))
             .filter_map(|case| case.breaks.get(&run))
@@ -1981,7 +1705,7 @@ fn the_corpus_fixes_the_work_cap_before_the_entry_tried_first() {
 /// on the entry it tries first, for a reader that applies the cap to the
 /// entries as it tries them: see
 /// [`the_corpus_fixes_the_work_cap_before_the_entry_tried_first`].
-fn shows_cap_before_first_try(breaks: &Breaks, later: Fcr) -> bool {
+fn shows_cap_before_first_try(breaks: &Breaks<Fcr>, later: Fcr) -> bool {
     let class = FcrList::class(HeaderMacWorkCap);
     // Every entry is one a reader tries, so a reader walking front to back
     // passes the first entry within the cap.

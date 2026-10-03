@@ -20,6 +20,7 @@
    - [3.8 `fuzz_exports.rs`](#38-fuzz_exportsrs)
    - [3.9 `suite_vector_gen.rs`](#39-suite_vector_genrs)
    - [3.10 `wire_vector_gen.rs`](#310-wire_vector_genrs)
+   - [3.11 `wire_check_order/`](#311-wire_check_order)
 4. [`crypto/`](#4-crypto)
    - [4.1 `crypto/keys.rs`](#41-cryptokeysrs)
    - [4.2 `crypto/kdf.rs`](#42-cryptokdfrs)
@@ -176,7 +177,10 @@ ferrocrypt-lib/src/
 ├── passphrase.rs
 ├── fuzz_exports.rs
 ├── suite_vector_gen.rs   (test-only)
-└── wire_vector_gen.rs    (test-only)
+├── wire_vector_gen.rs    (test-only)
+└── wire_check_order/     (test-only)
+    ├── mod.rs
+    └── fcr.rs
 ```
 
 Each file represents a stable responsibility boundary. File size is not the organizing principle; ownership, auditability, and prevention of duplicated security logic are the organizing principles.
@@ -447,6 +451,10 @@ It is compiled only for tests and must not grow non-generation logic.
 The module also owns the two replays §12.3 reserves for a crate-internal implementation: `replay_stream_kats`, which drives the production STREAM writer and reader against transcripts a committed PyNaCl/libsodium oracle produced, and `replay_fcr_payload_origins`, which derives the payload key behind each `.fcr` provenance row and checks its committed commitment. Both read the manifests through the strict parser in `ferrocrypt_test_support::wire_manifest`, whose field grammar the generator also writes with, and check a file's committed digest before using its bytes, so either replay run on its own validates every reference before reading it. Everything reachable through the public API is replayed from `tests/wire_corpus.rs` instead, through the same module, so the generator and every replay apply one grammar. `testvectors/wire/tools/verify_manifests.py` implements that grammar a second time on purpose, as the check an outside implementer runs with no FerroCrypt code.
 
 It is compiled only for tests and must not grow non-generation logic.
+
+### 3.11 `wire_check_order/`
+
+`wire_check_order/` is a `#[cfg(test)]`-only module that checks an order claim of the `FORMAT.md` §12.3 evidence table against the committed corpus: that the `.fcr` cases fix the order of every two checks the `.fcr` row names. `mod.rs` holds the evidence model. A rejected case states that, of the checks its artifact breaks, one of its stored class comes first, and a pair is fixed when no order of the checks that agrees with every case reverses it. A reader may make two per-entry checks in one pass, one entry at a time, so a check of the stored class on an entry such a reader meets first fixes nothing about a check on a later entry. A reader meets the entries in a direction the list allows: the §3.3 checks front to back, as §3.3 finds each entry by reading the one before it, and each §3.7 per-entry check front to back or back to front, in a direction of its own. Each way of giving them directions is a family of readers; a family the cases rule out entirely is refuted, and every other family must fix every claimed pair. A reader may also make a check that the specification makes once over the whole recipient list, such as the mixing rules or the header-MAC work cap, on the entries it has met so far, in a pass of either direction: each case records where such readers first meet it, and a check of the stored class that such a reader can meet first fixes nothing about it. The reader the specification describes must report every stored class. `fcr.rs` holds the `.fcr` check list: which checks an artifact breaks, each evaluated on its own from the bytes as a reader that made it first would see it; the checks a credential decides, evaluated with the corpus credentials through `wire_vector_gen.rs`'s credential reader; and which checks one file can break together. A reader that makes a check before the check that guards a declared end may read past that end, and where the declared lengths disagree it may take the entry region from any of them or from the declared header alone, so each artifact is evaluated under every such reading; a walk stops at the first entry that runs past its region. A check that only some readings break, or that the mixing rules or the work cap judge on a list cut short, counts only for a case that stores its class, and a case whose specification reading breaks no check of the list must have a header the library itself reads and classifies without error. A separate test goes through every way a reader may arrange the per-entry checks into passes over the entries, each read in a direction its checks allow, with the §3.3 framing checks kept together in a pass front to back as §3.3 requires, and requires each one that agrees with the cases to agree with the specification. Two more require a case for each reader that interleaves checks in a way no order expresses: one that makes the mixing rules or the work cap on the entries met so far and meets them before an entry that breaks a check §3.7 orders first, and one that applies the work cap to the entries as it tries them, in any order, and meets a check made on the entry it tries first before the cap. A reader that declares capabilities, one or several, is modelled too, and may lose only the pairs and cases with a check they change; for a file of a newer outer-container version they add, every check but the magic and the kind is uncertain, the prefix length included, and such a file is not held to the library's header check. §3.7 leaves the checks §8 makes on a supplied `private.key` before its unlock unordered against the `.fcr` checks, and the list holds none of the key checks made after the unlock, so a case whose key the reader refuses for any reason but a wrong passphrase must break no check of the list. The module is compiled only for tests and must not grow non-checking logic.
 
 ---
 

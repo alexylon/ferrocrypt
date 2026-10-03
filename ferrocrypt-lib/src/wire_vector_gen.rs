@@ -121,17 +121,18 @@ const SOURCE_FILE_NAME: &str = "p";
 /// reader implements one, so an outcome that rests only on it being unknown
 /// holds for every reader.
 fn type_capability(domain: &str, type_name: &str) -> Option<String> {
-    (!wire_manifest::is_test_type_name(type_name)).then(|| format!("{domain}:{type_name}"))
+    (!wire_manifest::is_test_type_name(type_name))
+        .then(|| wire_manifest::capability_id(domain, type_name))
 }
 
 /// [`type_capability`] for a recipient type.
 fn recipient_type_capability(type_name: &str) -> Option<String> {
-    type_capability("recipient_type", type_name)
+    type_capability(wire_manifest::RECIPIENT_TYPE_DOMAIN, type_name)
 }
 
 /// [`type_capability`] for a key type.
 fn key_type_capability(type_name: &str) -> Option<String> {
-    type_capability("key_type", type_name)
+    type_capability(wire_manifest::KEY_TYPE_DOMAIN, type_name)
 }
 
 /// A test recipient type name (`FORMAT.md` §3.3.1), so no reader implements
@@ -169,7 +170,7 @@ const NEWER_VERSION: u8 = 0x02;
 /// The capability ID of [`NEWER_VERSION`] in version domain `domain`
 /// (`FORMAT.md` §12.2).
 fn newer_version_capability(domain: &str) -> String {
-    format!("{domain}:0x{NEWER_VERSION:02X}")
+    wire_manifest::version_capability(domain, NEWER_VERSION)
 }
 
 /// The encoding version every stored version domain reserves, so it is
@@ -671,11 +672,16 @@ fn header_mac_work(supported: usize, header_len: usize) -> u64 {
 }
 
 /// The shortest extension region that takes a header holding `entries` past
-/// the header-MAC work cap of [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`],
-/// counting every entry as supported. It is one entry with
-/// [`UNKNOWN_IGNORABLE_TAG`], which a reader authenticates and skips, so it
-/// changes nothing else a reader checks.
-fn padding_past_lowered_header_mac_work_cap(entries: &[RecipientEntry]) -> Vec<u8> {
+/// the header-MAC work cap of [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]
+/// once `crossing` of its recipients authenticate it, while one recipient
+/// fewer stays within it. Every entry must be native, so every reader counts
+/// it as supported. The region is one entry with [`UNKNOWN_IGNORABLE_TAG`],
+/// which a reader authenticates and skips, so it changes nothing else a reader
+/// checks.
+fn padding_past_lowered_header_mac_work_cap(
+    entries: &[RecipientEntry],
+    crossing: usize,
+) -> Vec<u8> {
     assert!(
         entries.iter().all(|entry| {
             crate::recipient::policy::NativeRecipientType::from_type_name(&entry.type_name)
@@ -683,18 +689,24 @@ fn padding_past_lowered_header_mac_work_cap(entries: &[RecipientEntry]) -> Vec<u
         }),
         "every entry must be native, so every reader counts it as supported"
     );
-    let supported = entries.len();
+    assert!(
+        (1..=entries.len()).contains(&crossing),
+        "the entries hold the recipients that cross the cap"
+    );
     let cap = lowered_header_mac_work_cap();
-    let per_recipient = usize::try_from(cap).expect("the cap is small") / supported + 1;
+    let per_recipient = usize::try_from(cap).expect("the cap is small") / crossing + 1;
     let unpadded = header_len_of(entries);
     let ext_len = per_recipient
         .checked_sub(crate::format::PREFIX_SIZE + unpadded)
         .expect("the entries leave room to pad the header");
     let region = ignorable_tlv_region(ext_len, FILLER);
-    let work = header_mac_work(supported, unpadded + region.len());
+    let header_len = unpadded + region.len();
+    let work = header_mac_work(crossing, header_len);
     assert!(
-        work > cap && work - supported as u64 <= cap,
-        "the padding takes the header just past the cap"
+        work > cap
+            && work - crossing as u64 <= cap
+            && header_mac_work(crossing - 1, header_len) <= cap,
+        "the padding takes the header just past the cap at that many recipients"
     );
     region
 }
@@ -1227,14 +1239,16 @@ fn generate_key_pair() -> (Vec<u8>, Vec<u8>) {
 
 // ─── Generator ─────────────────────────────────────────────────────────────
 
-fn wire_dir() -> PathBuf {
+/// The committed wire corpus, `testvectors/wire/` of this crate.
+pub(crate) fn wire_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testvectors/wire")
 }
 
 /// Whether the corpus is on disk at all. `Cargo.toml` excludes it from the
-/// published crate, so the replays skip there; a checkout always has the
-/// directory, and a file missing from inside it still fails loudly.
-fn wire_corpus_present() -> bool {
+/// published crate, so the replays and the order checks skip there; a
+/// checkout always has the directory, and a file missing from inside it still
+/// fails loudly.
+pub(crate) fn wire_corpus_present() -> bool {
     wire_dir().is_dir()
 }
 
@@ -2426,8 +2440,10 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         |b| b[OFF_OUTER_VERSION] = NEWER_VERSION,
     );
     corpus.push_case(
-        row.capability(&newer_version_capability("outer_version"))
-            .reject("outer_version_unsupported", "unsupported_outer_version"),
+        row.capability(&newer_version_capability(
+            wire_manifest::OUTER_VERSION_DOMAIN,
+        ))
+        .reject("outer_version_unsupported", "unsupported_outer_version"),
     );
 
     // Truncation at each framing boundary: inside the prefix, inside the
@@ -2492,15 +2508,18 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 /// A case that also breaks a later check of the expected class fixes the order
 /// only together with the cases that put that check after the others. Two such
 /// facts, one check before a second and the second before a third, fix the
-/// first before the third. The entry checks run as one block, so a check
-/// outside them that comes before one of them comes before them all, and one
-/// that comes after one comes after them all. The cases here and in
+/// first before the third. A reader may meet the entries of a §3.7 step in
+/// either order, so where two such checks break on different entries, a case
+/// fixes their order only together with a case in the other entry order; the
+/// §3.3 checks meet the entries in declared order. The cases here and in
 /// [`write_header_check_order_cases`] and [`write_recipient_check_order_cases`]
-/// supply every pair the other cases leave open, alone or through such a chain.
-/// The version byte, whose outcomes differ in class, counts as one check per
-/// class. Only a pair with a check that a capability changes rests on a
-/// capability-relative case, so a reader that declares a capability loses only
-/// such pairs. The unknown recipient type and the extension tags these cases
+/// supply every pair the other cases leave open, alone or through such a chain,
+/// and [`write_walk_order_cases`] rules out a reader that makes the mixing
+/// rules or the work cap on the entries it has met so far. The version byte,
+/// whose outcomes differ in class, counts as one check per class. Only a pair
+/// with a check that a capability changes rests on a capability-relative case,
+/// so a reader that declares capabilities, one or several, loses only such
+/// pairs. The unknown recipient type and the extension tags these cases
 /// use are test values (`FORMAT.md` §3.3.1, §6), which no reader implements,
 /// so the only capability that touches them is a newer outer-container
 /// version.
@@ -2605,11 +2624,13 @@ fn write_prefix_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         },
     );
     corpus.push_case(
-        row.capability(&newer_version_capability("outer_version"))
-            .reject(
-                "outer_version_unsupported_and_prefix_flags_nonzero",
-                "unsupported_outer_version",
-            ),
+        row.capability(&newer_version_capability(
+            wire_manifest::OUTER_VERSION_DOMAIN,
+        ))
+        .reject(
+            "outer_version_unsupported_and_prefix_flags_nonzero",
+            "unsupported_outer_version",
+        ),
     );
 }
 
@@ -2806,9 +2827,22 @@ fn remove_first_entry_body_byte(b: &mut Vec<u8>, at: usize) {
 
 /// Offset just past the first recipient entry, by its own declared lengths.
 fn first_entry_end(b: &[u8]) -> usize {
-    OFF_FIRST_ENTRY_TYPE_NAME
-        + usize::from(be_u16_at(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN))
-        + be_u32_at(b, OFF_FIRST_ENTRY_BODY_LEN) as usize
+    entry_offset(b, 1)
+}
+
+/// Offset of recipient entry `index`, by the declared lengths of the entries
+/// before it.
+fn entry_offset(b: &[u8], index: usize) -> usize {
+    use crate::recipient::entry::{
+        ENTRY_BODY_LEN_OFFSET, ENTRY_HEADER_SIZE, ENTRY_TYPE_NAME_LEN_OFFSET,
+    };
+
+    (0..index).fold(OFF_FIRST_ENTRY, |offset, _| {
+        offset
+            + ENTRY_HEADER_SIZE
+            + usize::from(be_u16_at(b, offset + ENTRY_TYPE_NAME_LEN_OFFSET))
+            + be_u32_at(b, offset + ENTRY_BODY_LEN_OFFSET) as usize
+    })
 }
 
 /// Appends `extra` filler bytes to the first recipient entry's body and raises
@@ -2893,6 +2927,28 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         |b| {
             write_u16_be(b, OFF_RECIPIENT_COUNT, over_count_cap);
             write_u16_be(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN, 0);
+        },
+    );
+    // The region keeps the first seven bytes of the entry header: a legal
+    // `type_name_len`, zero flags, and the zero top three bytes of `body_len`.
+    // A reader that reads the last byte past the region finds a body length
+    // under every cap, so the entry breaks only checks of another class.
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-count-cap-before-entry-header",
+        "passphrase-main",
+        "recipient_count_above_default_cap_and_entry_header_shorter_than_eight_bytes",
+        "resource_cap_exceeded",
+        |b| {
+            use crate::recipient::entry::ENTRY_HEADER_SIZE;
+
+            write_u16_be(b, OFF_RECIPIENT_COUNT, over_count_cap);
+            let region_len = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN) as usize;
+            let kept = ENTRY_HEADER_SIZE - 1;
+            b.drain(OFF_FIRST_ENTRY + kept..OFF_FIRST_ENTRY + region_len);
+            let removed = i32::try_from(region_len - kept).expect("the region fits a length field");
+            shift_length_fields(b, &REGION_LENGTH_FIELDS, -removed);
         },
     );
 
@@ -3138,7 +3194,8 @@ fn damaged_x25519(
 /// Zeroes an `x25519` body's ephemeral public key, which the §4.2 preflight
 /// refuses.
 fn zero_x25519_ephemeral(entry: &mut RecipientEntry) {
-    entry.body[..x25519::PUBLIC_KEY_SIZE].fill(0);
+    let at = x25519::EPHEMERAL_PUBLIC_KEY_OFFSET;
+    entry.body[at..at + x25519::PUBLIC_KEY_SIZE].fill(0);
 }
 
 /// Sets the critical flag, which §3.4 forbids on a native entry.
@@ -3427,6 +3484,246 @@ fn write_recipient_framing_cases(
     }
 
     write_recipient_check_order_cases(corpus, sources, keys, base);
+    write_walk_order_cases(corpus, sources);
+}
+
+/// The start of the ID of every case [`write_walk_order_cases`] writes, by
+/// which the order checks leave those cases out.
+pub(crate) const WALK_ORDER_CASE_PREFIX: &str = "walk-order-";
+
+/// The place of the mixing rules and the header-MAC work cap after every check
+/// that `FORMAT.md` §3.3 and §3.7 steps 6 to 8 make on the entries, for a
+/// reader that makes them on the entries it has met so far instead of once over
+/// the whole list. Each case damages the middle entry of one file of five
+/// `argon2id` entries, or adds a defect past its last entry. The first two
+/// entries of that file already break both, and so do its last two, so a reader
+/// walking the entries either way meets the mixing rules and the cap before the
+/// defect, and must still report its check. §3.3 walks the entries front to
+/// back, so a defect that stops the walk, or that the walk finds past the last
+/// entry, needs no entries after it. A body over the default cap reports the
+/// class of the work cap, so its file breaks the mixing rules alone, under the
+/// default caps.
+fn write_walk_order_cases(corpus: &mut Corpus, sources: &Path) {
+    use crate::recipient::entry::{
+        ENTRY_BODY_LEN_OFFSET, ENTRY_HEADER_SIZE, ENTRY_RECIPIENT_FLAGS_OFFSET,
+        ENTRY_TYPE_NAME_LEN_OFFSET,
+    };
+
+    let first_case = corpus.cases.len();
+
+    /// The damaged entry, with as many entries before it as after it.
+    const MIDDLE: usize = 2;
+    let condition = |defect: &str| {
+        format!("argon2id_mixed_and_header_mac_work_above_local_cap_before_{defect}")
+    };
+    let edit_middle = |edit: fn(&mut RecipientEntry)| {
+        Box::new(move |b: &mut Vec<u8>| edit_entry(b, MIDDLE, edit))
+    };
+    let mut mixed = None;
+    under_limit_profile(corpus, LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID, |corpus| {
+        let base = seeded_crafted_reject_case(
+            corpus,
+            sources,
+            "walk-order-mixed-entries",
+            "passphrase-main",
+            None,
+            (
+                "argon2id_mixed_with_other_entries_and_header_mac_work_above_local_cap",
+                "incompatible_recipients",
+            ),
+            &|file_key| (0..=2 * MIDDLE).map(|_| argon2id_entry(file_key)).collect(),
+            &no_extension,
+        );
+        let header_len = be_u32_at(&base.bytes, OFF_HEADER_LEN) as usize;
+        let cap = lowered_header_mac_work_cap();
+        assert!(
+            header_mac_work(1, header_len) <= cap && header_mac_work(2, header_len) > cap,
+            "two entries cross the cap and one does not"
+        );
+
+        // A reader that implements the unknown type stops refusing the
+        // critical entry, so this case depends on the type; the type is a test
+        // type, which no reader implements, so the case is invariant.
+        let case_id = "walk-order-unknown-critical-before-mixing-and-cap";
+        let row = mutated_fcr_row(corpus, &base, case_id, "passphrase-main", |b| {
+            edit_entry(b, MIDDLE, |entry| *entry = unknown_entry(true))
+        });
+        corpus.push_case(
+            row.capability_if_any(recipient_type_capability(UNKNOWN_RECIPIENT_TYPE).as_deref())
+                .reject(
+                    &condition("critical_recipient_type_unsupported"),
+                    "unknown_critical_recipient",
+                ),
+        );
+
+        let middle = |b: &[u8]| entry_offset(b, MIDDLE);
+        let mutations: [ByteMutationCase; 10] = [
+            (
+                "walk-order-type-name-len-before-mixing-and-cap",
+                Box::new(move |b: &mut Vec<u8>| {
+                    // The name's bytes now open the body, so the entry keeps
+                    // its place in the region.
+                    let at = middle(b);
+                    let name_len = be_u16_at(b, at + ENTRY_TYPE_NAME_LEN_OFFSET);
+                    write_u16_be(b, at + ENTRY_TYPE_NAME_LEN_OFFSET, 0);
+                    let body_len = be_u32_at(b, at + ENTRY_BODY_LEN_OFFSET);
+                    write_u32_be(
+                        b,
+                        at + ENTRY_BODY_LEN_OFFSET,
+                        body_len + u32::from(name_len),
+                    );
+                }),
+                "entry_type_name_len_zero",
+                "malformed_recipient_entry",
+            ),
+            (
+                "walk-order-flags-before-mixing-and-cap",
+                Box::new(move |b: &mut Vec<u8>| {
+                    let at = middle(b) + ENTRY_RECIPIENT_FLAGS_OFFSET;
+                    write_u16_be(b, at, RESERVED_RECIPIENT_FLAG_BIT);
+                }),
+                "entry_reserved_flag_bit_nonzero",
+                "recipient_flags_reserved",
+            ),
+            (
+                "walk-order-type-name-before-mixing-and-cap",
+                Box::new(move |b: &mut Vec<u8>| {
+                    let at = middle(b) + ENTRY_HEADER_SIZE;
+                    b[at] = UNGRAMMATICAL_TYPE_NAME_BYTE;
+                }),
+                "entry_type_name_violates_grammar",
+                "malformed_type_name",
+            ),
+            (
+                "walk-order-body-len-before-mixing-and-cap",
+                Box::new(move |b: &mut Vec<u8>| {
+                    let at = middle(b) + ENTRY_BODY_LEN_OFFSET;
+                    write_u32_be(b, at, crate::format::BODY_LEN_MAX + 1);
+                }),
+                "entry_body_len_above_structural_maximum",
+                "malformed_recipient_entry",
+            ),
+            (
+                "walk-order-trailing-bytes-before-mixing-and-cap",
+                Box::new(|b: &mut Vec<u8>| pad_recipient_region(b, 1)),
+                "bytes_left_after_last_entry",
+                "malformed_recipient_entry",
+            ),
+            // The region keeps one more entry's `type_name_len`,
+            // `recipient_flags`, and the zero high half of its `body_len`, so
+            // a reader that reads the rest of `body_len` past the region finds
+            // a length under the structural maximum.
+            (
+                "walk-order-entry-header-before-mixing-and-cap",
+                Box::new(|b: &mut Vec<u8>| {
+                    let declared = be_u16_at(b, OFF_RECIPIENT_COUNT);
+                    let added = entry_offset(b, usize::from(declared));
+                    pad_recipient_region(b, ENTRY_BODY_LEN_OFFSET + size_of::<u16>());
+                    let name_len = u16::try_from(argon2id::TYPE_NAME.len()).expect("name length");
+                    write_u16_be(b, added + ENTRY_TYPE_NAME_LEN_OFFSET, name_len);
+                    write_u16_be(b, OFF_RECIPIENT_COUNT, declared + 1);
+                }),
+                "last_entry_header_shorter_than_eight_bytes",
+                "malformed_recipient_entry",
+            ),
+            (
+                "walk-order-native-flags-before-mixing-and-cap",
+                edit_middle(set_critical_flag),
+                "argon2id_critical_flag_set",
+                "malformed_recipient_entry",
+            ),
+            (
+                "walk-order-native-length-before-mixing-and-cap",
+                edit_middle(shorten_body),
+                "argon2id_body_short",
+                "malformed_recipient_entry",
+            ),
+            (
+                "walk-order-kdf-params-before-mixing-and-cap",
+                edit_middle(|entry| {
+                    let at = argon2id::KDF_PARAMS_OFFSET;
+                    entry.body[at..at + KDF_PARAMS_SIZE]
+                        .copy_from_slice(&kdf_params_without_lanes().to_bytes());
+                }),
+                "argon2id_lanes_below_structural_minimum",
+                "invalid_kdf_parameters",
+            ),
+            (
+                "walk-order-x25519-ephemeral-before-mixing-and-cap",
+                edit_middle(|entry| {
+                    *entry = RecipientEntry {
+                        type_name: x25519::TYPE_NAME.to_string(),
+                        recipient_flags: 0,
+                        body: vec![FILLER; x25519::BODY_LENGTH],
+                    };
+                    zero_x25519_ephemeral(entry);
+                }),
+                "x25519_ephemeral_all_zero",
+                "malformed_recipient_entry",
+            ),
+        ];
+        for (case_id, mutate, defect, class) in mutations {
+            mutate_fcr(
+                corpus,
+                &base,
+                case_id,
+                "passphrase-main",
+                &condition(defect),
+                class,
+                mutate,
+            );
+        }
+        mixed = Some(base);
+    });
+
+    let mixed = mixed.expect("the base file is written");
+    mutate_fcr(
+        corpus,
+        &mixed,
+        "walk-order-body-cap-before-mixing",
+        "passphrase-main",
+        "argon2id_mixed_before_entry_body_len_above_default_cap",
+        "resource_cap_exceeded",
+        |b| {
+            edit_entry(b, MIDDLE, |entry| {
+                *entry = unknown_entry(false);
+                let cap = crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as usize;
+                entry.body.resize(cap + 1, FILLER);
+            })
+        },
+    );
+    assert!(
+        corpus.cases[first_case..]
+            .iter()
+            .all(|case| case.case_id.starts_with(WALK_ORDER_CASE_PREFIX)),
+        "every walk-order case ID starts with {WALK_ORDER_CASE_PREFIX}"
+    );
+}
+
+/// Rewrites recipient entry `index` of a `.fcr` through `edit`, which may give
+/// it what the header builder refuses to write, and moves
+/// `recipient_entries_len` and `header_len` to match. The header MAC is left
+/// as it was.
+fn edit_entry(b: &mut Vec<u8>, index: usize, edit: impl FnOnce(&mut RecipientEntry)) {
+    use crate::recipient::entry::{
+        ENTRY_HEADER_SIZE, ENTRY_RECIPIENT_FLAGS_OFFSET, ENTRY_TYPE_NAME_LEN_OFFSET,
+    };
+
+    let start = entry_offset(b, index);
+    let end = entry_offset(b, index + 1);
+    let name_start = start + ENTRY_HEADER_SIZE;
+    let name_end = name_start + usize::from(be_u16_at(b, start + ENTRY_TYPE_NAME_LEN_OFFSET));
+    let mut entry = RecipientEntry {
+        type_name: String::from_utf8(b[name_start..name_end].to_vec()).expect("a UTF-8 name"),
+        recipient_flags: be_u16_at(b, start + ENTRY_RECIPIENT_FLAGS_OFFSET),
+        body: b[name_end..end].to_vec(),
+    };
+    edit(&mut entry);
+    let edited = entry.to_bytes();
+    let length = |len: usize| i32::try_from(len).expect("an entry length fits a signed shift");
+    let delta = length(edited.len()) - length(end - start);
+    b.splice(start..end, edited);
+    shift_length_fields(b, &REGION_LENGTH_FIELDS, delta);
 }
 
 /// The `FORMAT.md` §3.3 check order, and §3.7 before any recipient is tried, by
@@ -3525,14 +3822,18 @@ fn write_recipient_check_order_cases(
             "entry_type_name_violates_grammar_and_bytes_left_after_last_entry",
             "malformed_type_name",
         ),
-        // The region keeps the second entry's `type_name_len` and
-        // `recipient_flags` but not its `body_len`, so a reader that checks
-        // each field as it reads it sees the reserved flag first.
+        // The region keeps the second entry's `type_name_len`,
+        // `recipient_flags`, and the zero high half of its `body_len`. A reader
+        // that checks each field as it reads it sees the reserved flag first,
+        // and one that reads the rest of `body_len` past the region finds a
+        // length under the structural maximum, so the only other check of this
+        // class it can break is the fit, which `entry-order-flags-before-fit`
+        // puts after the flags.
         (
             "entry-order-entry-header-before-flags",
             Box::new(move |b: &mut Vec<u8>| {
                 let second = first_entry_end(b);
-                pad_recipient_region(b, ENTRY_BODY_LEN_OFFSET);
+                pad_recipient_region(b, ENTRY_BODY_LEN_OFFSET + size_of::<u16>());
                 let name_len = u16::try_from(argon2id::TYPE_NAME.len()).expect("name length");
                 write_u16_be(b, second + ENTRY_TYPE_NAME_LEN_OFFSET, name_len);
                 write_u16_be(
@@ -4789,7 +5090,9 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
         "public-key-newer-version",
         format!("{newer}\n").as_bytes(),
     )
-    .capability(&newer_version_capability("public_key_version"))
+    .capability(&newer_version_capability(
+        wire_manifest::PUBLIC_KEY_VERSION_DOMAIN,
+    ))
     .reject(
         "public_key_version_not_supported",
         "unsupported_public_key_version",
@@ -4925,7 +5228,9 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
         "public-key-newer-version-type-name-len-zero",
         format!("{newer}\n").as_bytes(),
     )
-    .capability(&newer_version_capability("public_key_version"))
+    .capability(&newer_version_capability(
+        wire_manifest::PUBLIC_KEY_VERSION_DOMAIN,
+    ))
     .reject(
         "public_key_version_not_supported_and_type_name_len_zero",
         "unsupported_public_key_version",
@@ -5099,7 +5404,8 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
 /// type's own rules cannot be broken together with type support or with a
 /// malformed type name, so no chain reaches them through those checks. Only a
 /// pair with a check that a capability changes rests on a capability-relative
-/// case, so a reader that declares a capability loses only such pairs.
+/// case, so a reader that declares capabilities, one or several, loses only
+/// such pairs.
 fn write_public_key_order_cases(corpus: &mut Corpus, private_key: &[u8]) {
     use crate::key::public::{
         PAYLOAD_HEADER_SIZE, PUBLIC_KEY_CHECKSUM_SIZE, PUBLIC_KEY_FILE_READ_CAP_BYTES,
@@ -5325,7 +5631,9 @@ fn write_public_key_order_cases(corpus: &mut Corpus, private_key: &[u8]) {
     ];
     for (case_id, payload, condition) in newer_version_cases {
         let row = public_key_row(corpus, case_id, &file(&encode(&payload)))
-            .capability(&newer_version_capability("public_key_version"))
+            .capability(&newer_version_capability(
+                wire_manifest::PUBLIC_KEY_VERSION_DOMAIN,
+            ))
             .reject(condition, "unsupported_public_key_version");
         corpus.push_case(row);
     }
@@ -6069,7 +6377,9 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let mut newer = canonical.clone();
     newer[VERSION_OFFSET] = NEWER_VERSION;
     let row = private_key_row(corpus, "private-key-newer-version", &newer)
-        .capability(&newer_version_capability("private_key_version"))
+        .capability(&newer_version_capability(
+            wire_manifest::PRIVATE_KEY_VERSION_DOMAIN,
+        ))
         .reject(
             "private_key_version_unsupported",
             "unsupported_private_key_version",
@@ -6085,7 +6395,9 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "newer-version-type-name-len-zero",
         &newer_empty_type,
-        Some(&newer_version_capability("private_key_version")),
+        Some(&newer_version_capability(
+            wire_manifest::PRIVATE_KEY_VERSION_DOMAIN,
+        )),
         "private_key_version_unsupported_and_type_name_len_zero",
         "unsupported_private_key_version",
     );
@@ -6426,7 +6738,8 @@ fn private_key_case_through_both_readers(
 /// The type's own rules cannot be broken together with type support or with a
 /// malformed type name, so no chain reaches them through those checks. Only a
 /// pair with a check that a capability changes rests on a capability-relative
-/// case, so a reader that declares a capability loses only such pairs.
+/// case, so a reader that declares capabilities, one or several, loses only
+/// such pairs.
 fn write_private_key_order_cases(
     corpus: &mut Corpus,
     canonical: &[u8],
@@ -6557,7 +6870,9 @@ fn write_private_key_order_cases(
             declare_newer_version(b);
             write_u16_be(b, KEY_FLAGS_OFFSET, RESERVED_FLAG_BIT);
         }),
-        Some(&newer_version_capability("private_key_version")),
+        Some(&newer_version_capability(
+            wire_manifest::PRIVATE_KEY_VERSION_DOMAIN,
+        )),
         "private_key_version_unsupported_and_key_flags_nonzero",
         "unsupported_private_key_version",
     );
@@ -7145,7 +7460,7 @@ fn write_fca_cases(corpus: &mut Corpus) {
         corpus,
         "fca-newer-version",
         &newer,
-        &newer_version_capability("fca_version"),
+        &newer_version_capability(wire_manifest::FCA_VERSION_DOMAIN),
         "fca_version_unsupported",
         "unsupported_fca_version",
     );
@@ -8077,18 +8392,28 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
 
 /// The place of the header-MAC work cap in `FORMAT.md` §3.7: after every
 /// check of steps 1 to 9, and before the private-key unlock and any recipient
-/// is tried. Each file holds native entries only, padded just past the cap. An
-/// `argon2id` entry mixed with an `x25519` entry reports the mixing class,
-/// which, through the order the step-8 cases already fix, puts the cap after
-/// every recipient check. A file of one `x25519` entry is refused by the cap
-/// with the key the entry is for. A wrong passphrase on a file of one
+/// is tried. Each file holds native entries only, padded just past the cap at
+/// a chosen number of them. An `argon2id` entry between two `x25519` entries,
+/// either of which alone crosses the cap, reports the mixing class, so a reader
+/// that applies the cap to the entries it has met so far, walking them either
+/// way, must still report the mixing rules first. Through the order the step-8
+/// cases already fix, that puts the cap after every recipient check. A file of
+/// two `x25519` entries, which cross the cap only together, is refused by the
+/// cap with the key the entries are for. A wrong passphrase on a file of one
 /// `argon2id` entry and, on the `x25519` file, a wrong private-key passphrase,
-/// a key agreement that yields the all-zero shared secret, a private key that
-/// opens no entry, and a modified header MAC each report the cap too, so it
-/// precedes the unlock and every check made while a recipient is tried.
+/// a key agreement that yields the all-zero shared secret on each entry, a
+/// private key that opens no entry, and a modified header MAC each report the
+/// cap too, so it precedes the unlock and every check made while a recipient
+/// is tried. On the `x25519` file this holds also for a reader that applies
+/// the cap to the entries as it tries them, in any order: the entry it tries
+/// first is within the cap and already fails.
 fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
-    let padding = padding_past_lowered_header_mac_work_cap;
-    let opened_by_a = |file_key: &FileKey| vec![x25519_entry(&keys.public_a, file_key)];
+    let padding = |crossing: usize| {
+        move |entries: &[RecipientEntry]| {
+            padding_past_lowered_header_mac_work_cap(entries, crossing)
+        }
+    };
+    let for_a = |file_key: &FileKey| x25519_entry(&keys.public_a, file_key);
 
     seeded_crafted_reject_case(
         corpus,
@@ -8100,8 +8425,8 @@ fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: 
             "argon2id_mixed_with_another_recipient_and_header_mac_work_above_local_cap",
             "incompatible_recipients",
         ),
-        &|file_key| [vec![argon2id_entry(file_key)], opened_by_a(file_key)].concat(),
-        &padding,
+        &|file_key| vec![for_a(file_key), argon2id_entry(file_key), for_a(file_key)],
+        &padding(1),
     );
     let opened = seeded_crafted_reject_case(
         corpus,
@@ -8110,8 +8435,8 @@ fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: 
         "private-key-a",
         None,
         ("header_mac_work_above_local_cap", "resource_cap_exceeded"),
-        &opened_by_a,
-        &padding,
+        &|file_key| vec![for_a(file_key), for_a(file_key)],
+        &padding(2),
     );
     seeded_crafted_reject_case(
         corpus,
@@ -8124,7 +8449,7 @@ fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: 
             "resource_cap_exceeded",
         ),
         &|file_key| vec![argon2id_entry(file_key)],
-        &padding,
+        &padding(1),
     );
     // The same file with a credential that cannot open it: a wrong
     // private-key passphrase, then a private key no entry is for.
@@ -8144,10 +8469,10 @@ fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: 
         "header_mac_work_above_local_cap_and_x25519_recipient_key_does_not_open_any_slot",
         "resource_cap_exceeded",
     );
-    // With the key the entry is for, the same file with an ephemeral key that
-    // makes the key agreement yield the all-zero shared secret, then with its
-    // header MAC modified, so that only the MAC would fail.
-    let ephemeral = body_offset(x25519::TYPE_NAME);
+    // With the key the entries are for, the same file with an ephemeral key
+    // in each entry that makes the key agreement yield the all-zero shared
+    // secret, then with its header MAC modified, so that only the MAC would
+    // fail.
     mutate_fcr(
         corpus,
         &opened,
@@ -8156,8 +8481,14 @@ fn write_header_mac_work_order_cases(corpus: &mut Corpus, sources: &Path, keys: 
         "header_mac_work_above_local_cap_and_x25519_all_zero_shared_secret",
         "resource_cap_exceeded",
         |b| {
-            b[ephemeral..ephemeral + x25519::PUBLIC_KEY_SIZE]
-                .copy_from_slice(&SMALL_ORDER_EPHEMERAL)
+            for index in 0..usize::from(be_u16_at(b, OFF_RECIPIENT_COUNT)) {
+                let ephemeral = entry_offset(b, index)
+                    + crate::recipient::entry::ENTRY_HEADER_SIZE
+                    + x25519::TYPE_NAME.len()
+                    + x25519::EPHEMERAL_PUBLIC_KEY_OFFSET;
+                b[ephemeral..ephemeral + x25519::PUBLIC_KEY_SIZE]
+                    .copy_from_slice(&SMALL_ORDER_EPHEMERAL);
+            }
         },
     );
     mutate_fcr(
@@ -8461,8 +8792,8 @@ fn replay_fcr_payload_origins() {
     );
 }
 
-/// The `credentials.tsv` row for one credential. Read from the manifest so the
-/// replay follows the same references an outside implementation would.
+/// The `credentials.tsv` row for one credential. Read from the manifest so its
+/// callers follow the same references an outside implementation would.
 fn credential_row(root: &Path, credential_id: &str) -> BTreeMap<String, String> {
     read_table(root, "credentials.tsv")
         .into_iter()
@@ -8485,55 +8816,69 @@ fn credential_passphrase(
     )
 }
 
+/// A corpus credential, its files checked against their committed digests.
+pub(crate) enum CorpusCredential {
+    /// Opens no slot.
+    None,
+    Passphrase(Passphrase),
+    /// A `private.key`, opened by path as a reader opens one, and the
+    /// passphrase that unlocks it.
+    PrivateKey {
+        key: PathBuf,
+        unlock: Passphrase,
+    },
+}
+
+/// Reads the credential `credential_id` names in `credentials.tsv`.
+pub(crate) fn read_credential(root: &Path, credential_id: &str) -> CorpusCredential {
+    let credential = credential_row(root, credential_id);
+    match credential["kind"].as_str() {
+        "none" => CorpusCredential::None,
+        "passphrase" => CorpusCredential::Passphrase(credential_passphrase(
+            root,
+            &credential,
+            "primary_ref",
+            "primary_sha3_256",
+        )),
+        "private_key" => {
+            // `secret_ref` is the passphrase that unlocks the key file.
+            assert_ne!(
+                credential["secret_ref"], "-",
+                "{credential_id}: a private_key credential names its unlock passphrase"
+            );
+            read_committed(root, &credential, "primary_ref", "primary_sha3_256");
+            CorpusCredential::PrivateKey {
+                key: root.join(&credential["primary_ref"]),
+                unlock: credential_passphrase(root, &credential, "secret_ref", "secret_sha3_256"),
+            }
+        }
+        other => panic!("{credential_id}: unsupported credential kind {other}"),
+    }
+}
+
 /// Tries every recipient slot with one corpus credential, returning the first
 /// `file_key` that unwraps. Mirrors the slot loop of `FORMAT.md` §3.7 without
 /// its header-MAC acceptance step, which several anchors deliberately fail.
-///
-/// Dispatches on the `kind` column of `credentials.tsv` and reads the material
-/// each row references, so an origin anchored to any declared credential
-/// resolves without this function naming it.
 fn unwrap_any_slot(
     root: &Path,
     entries: &[RecipientEntry],
     credential_id: &str,
 ) -> Option<FileKey> {
-    let credential = credential_row(root, credential_id);
-    let (passphrase, private_key) = match credential["kind"].as_str() {
-        // The `none` credential opens no slot.
-        "none" => return None,
-        "passphrase" => (
-            Some(credential_passphrase(
-                root,
-                &credential,
-                "primary_ref",
-                "primary_sha3_256",
-            )),
+    let (passphrase, private_key) = match read_credential(root, credential_id) {
+        CorpusCredential::None => return None,
+        CorpusCredential::Passphrase(passphrase) => (Some(passphrase), None),
+        // A row pairing a key with a passphrase that does not unlock it opens
+        // no slot, which is the same answer as a key that unwraps nothing.
+        CorpusCredential::PrivateKey { key, unlock } => match x25519::open_x25519_key_file(
+            &key,
+            &unlock,
             None,
-        ),
-        "private_key" => {
-            // `secret_ref` is the passphrase that unlocks the key file. A row
-            // pairing a key with a passphrase that does not unlock it opens no
-            // slot, which is the same answer as a key that unwraps nothing.
-            assert_ne!(
-                credential["secret_ref"], "-",
-                "{credential_id}: a private_key credential names its unlock passphrase"
-            );
-            let unlock = credential_passphrase(root, &credential, "secret_ref", "secret_sha3_256");
-            // Opened by path; its bytes are checked against the committed
-            // digest first.
-            read_committed(root, &credential, "primary_ref", "primary_sha3_256");
-            match x25519::open_x25519_key_file(
-                &root.join(&credential["primary_ref"]),
-                &unlock,
-                None,
-                crate::KeyReadLimits::default(),
-                &|_| {},
-            ) {
-                Ok(opened) => (None, Some(opened.secret)),
-                Err(_) => return None,
-            }
-        }
-        other => panic!("{credential_id}: unsupported credential kind {other}"),
+            crate::KeyReadLimits::default(),
+            &|_| {},
+        ) {
+            Ok(opened) => (None, Some(opened.secret)),
+            Err(_) => return None,
+        },
     };
 
     entries.iter().find_map(

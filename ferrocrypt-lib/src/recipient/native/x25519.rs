@@ -69,7 +69,7 @@ pub(crate) const BODY_LENGTH: usize = PUBLIC_KEY_SIZE + WRAP_NONCE_SIZE + WRAPPE
 /// HKDF-SHA3-256 `info` for the X25519 ECDH-derived wrap key.
 pub(crate) const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/x25519/wrap";
 
-const EPHEMERAL_PUBLIC_KEY_OFFSET: usize = 0;
+pub(crate) const EPHEMERAL_PUBLIC_KEY_OFFSET: usize = 0;
 const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 

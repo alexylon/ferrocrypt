@@ -448,6 +448,9 @@ mod suite_vector_gen;
 #[cfg(test)]
 mod wire_vector_gen;
 
+#[cfg(test)]
+mod wire_check_order;
+
 /// Decodes a Bech32 recipient string (`fcr1…`) into raw X25519 public-key
 /// material.
 ///

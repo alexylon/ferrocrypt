@@ -378,6 +378,63 @@ pub fn is_test_tag(tag: u16) -> bool {
 /// capability names one.
 const RESERVED_TAGS: [u16; 2] = [0x0000, 0x8000];
 
+// The capability domains of `FORMAT.md` §12.2: the stored version domains,
+// the TLV namespaces, and the type domains.
+pub const OUTER_VERSION_DOMAIN: &str = "outer_version";
+pub const FCA_VERSION_DOMAIN: &str = "fca_version";
+pub const PUBLIC_KEY_VERSION_DOMAIN: &str = "public_key_version";
+pub const PRIVATE_KEY_VERSION_DOMAIN: &str = "private_key_version";
+pub const OUTER_TLV_DOMAIN: &str = "outer_tlv";
+pub const PRIVATE_KEY_TLV_DOMAIN: &str = "private_key_tlv";
+pub const FCA_ARCHIVE_TLV_DOMAIN: &str = "fca_archive_tlv";
+pub const FCA_ENTRY_TLV_DOMAIN: &str = "fca_entry_tlv";
+pub const RECIPIENT_TYPE_DOMAIN: &str = "recipient_type";
+pub const KEY_TYPE_DOMAIN: &str = "key_type";
+
+/// The start of a hexadecimal capability subject.
+const HEX_SUBJECT_PREFIX: &str = "0x";
+
+/// The capability ID for `subject` in `domain`.
+pub fn capability_id(domain: &str, subject: &str) -> String {
+    format!("{domain}:{subject}")
+}
+
+/// The capability ID of `version` in the stored version domain `domain`.
+pub fn version_capability(domain: &str, version: u8) -> String {
+    capability_id(domain, &format!("{HEX_SUBJECT_PREFIX}{version:02X}"))
+}
+
+/// The domain and subject of a capability ID.
+pub fn capability_parts(value: &str) -> Option<(&str, &str)> {
+    value.split_once(':')
+}
+
+/// The number a hexadecimal capability subject names: `0x` and exactly
+/// `digits` uppercase hexadecimal digits.
+fn hex_subject(subject: &str, digits: usize) -> Option<u64> {
+    subject
+        .strip_prefix(HEX_SUBJECT_PREFIX)
+        .filter(|hex| {
+            hex.len() == digits
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'A'..='F'))
+        })
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+}
+
+/// The version byte a stored version subject names: `0x` and two uppercase
+/// hexadecimal digits.
+pub fn subject_version(subject: &str) -> Option<u8> {
+    hex_subject(subject, 2 * size_of::<u8>()).and_then(|version| u8::try_from(version).ok())
+}
+
+/// The tag a TLV namespace subject names: `0x` and four uppercase hexadecimal
+/// digits.
+fn subject_tag(subject: &str) -> Option<u16> {
+    hex_subject(subject, 2 * size_of::<u16>()).and_then(|tag| u16::try_from(tag).ok())
+}
+
 /// Whether `value` has one of the capability-ID forms of `FORMAT.md` §12.2: a
 /// stored version domain with two uppercase hexadecimal digits other than the
 /// reserved `0x00`, a TLV namespace with four other than a reserved or test
@@ -385,27 +442,67 @@ const RESERVED_TAGS: [u16; 2] = [0x0000, 0x8000];
 /// A reserved or test value is never implemented, so §12.2 names no capability
 /// after one.
 pub fn is_capability_id(value: &str) -> bool {
-    let Some((domain, subject)) = value.split_once(':') else {
+    let Some((domain, subject)) = capability_parts(value) else {
         return false;
     };
-    let hex_digits = |digits: usize| {
-        subject.strip_prefix("0x").filter(|hex| {
-            hex.len() == digits
-                && hex
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, 'A'..='F'))
-        })
-    };
     match domain {
-        "outer_version" | "fca_version" | "public_key_version" | "private_key_version" => {
-            hex_digits(2).is_some() && subject != "0x00"
+        OUTER_VERSION_DOMAIN
+        | FCA_VERSION_DOMAIN
+        | PUBLIC_KEY_VERSION_DOMAIN
+        | PRIVATE_KEY_VERSION_DOMAIN => {
+            subject_version(subject).is_some_and(|version| version != 0)
         }
-        "outer_tlv" | "private_key_tlv" | "fca_archive_tlv" | "fca_entry_tlv" => hex_digits(4)
-            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+        OUTER_TLV_DOMAIN
+        | PRIVATE_KEY_TLV_DOMAIN
+        | FCA_ARCHIVE_TLV_DOMAIN
+        | FCA_ENTRY_TLV_DOMAIN => subject_tag(subject)
             .is_some_and(|tag| !is_test_tag(tag) && !RESERVED_TAGS.contains(&tag)),
-        "recipient_type" | "key_type" => !subject.is_empty() && !is_test_type_name(subject),
+        RECIPIENT_TYPE_DOMAIN | KEY_TYPE_DOMAIN => {
+            !subject.is_empty() && !is_test_type_name(subject)
+        }
         _ => false,
     }
+}
+
+/// The value of `column` in `row`, refusing a row without that column.
+pub fn field<'a>(row: &'a Row, column: &str) -> &'a str {
+    row.get(column)
+        .unwrap_or_else(|| panic!("missing column {column}"))
+}
+
+/// The start of every cap column of `limit-profiles.tsv`.
+pub const CAP_COLUMN_PREFIX: &str = "max_";
+
+/// The value a `limit-profiles.tsv` row gives limit `column`.
+pub fn limit_value(row: &Row, column: &str) -> u64 {
+    field(row, column).parse().unwrap_or_else(|_| {
+        let id = field(row, "limit_profile_id");
+        panic!("{id}: {column} is not a decimal limit")
+    })
+}
+
+/// The corpus revision `CORPUS-REVISION` records.
+pub fn corpus_revision(root: &Path) -> u32 {
+    fs::read_to_string(root.join("CORPUS-REVISION"))
+        .expect("read CORPUS-REVISION")
+        .trim()
+        .parse()
+        .expect("CORPUS-REVISION is a number")
+}
+
+/// Case IDs an erratum withdraws from replay at `revision`. §12.3 keeps the
+/// row and its history in place; only the replay stops asserting it.
+pub fn cases_withdrawn_by_errata(root: &Path, revision: u32) -> BTreeSet<String> {
+    read_table(root, "errata.tsv")
+        .iter()
+        .filter(|row| {
+            let effective: u32 = field(row, "effective_corpus_revision")
+                .parse()
+                .expect("errata.tsv: effective_corpus_revision is not a number");
+            effective <= revision
+        })
+        .map(|row| field(row, "affected_case_id").to_string())
+        .collect()
 }
 
 /// Whether every character of `value` is a digit or a lowercase `a` to `f`.

@@ -414,10 +414,11 @@ pub(crate) fn keypair_suite_from_private_key_version(
 
 // ─── Prefix ─────────────────────────────────────────────────────────────────
 
-const PREFIX_VERSION_OFFSET: usize = MAGIC_SIZE;
-const PREFIX_KIND_OFFSET: usize = PREFIX_VERSION_OFFSET + 1;
-const PREFIX_FLAGS_OFFSET: usize = PREFIX_KIND_OFFSET + 1;
-const PREFIX_HEADER_LEN_OFFSET: usize = PREFIX_FLAGS_OFFSET + size_of::<u16>();
+// Offsets of the prefix fields from the start of the file.
+pub(crate) const PREFIX_VERSION_OFFSET: usize = MAGIC_SIZE;
+pub(crate) const PREFIX_KIND_OFFSET: usize = PREFIX_VERSION_OFFSET + 1;
+pub(crate) const PREFIX_FLAGS_OFFSET: usize = PREFIX_KIND_OFFSET + 1;
+pub(crate) const PREFIX_HEADER_LEN_OFFSET: usize = PREFIX_FLAGS_OFFSET + size_of::<u16>();
 const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE);
 
 /// Parsed `.fcr` 12-byte prefix. (`private.key` has its own 90-byte
@@ -589,13 +590,16 @@ pub(crate) fn read_prefix_from_reader(
 
 // ─── header_fixed ───────────────────────────────────────────────────────────
 
-const HEADER_FIXED_FLAGS_OFFSET: usize = 0;
-const HEADER_FIXED_RECIPIENT_COUNT_OFFSET: usize = HEADER_FIXED_FLAGS_OFFSET + size_of::<u16>();
-const HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET: usize =
+// Offsets of the `header_fixed` fields from the start of `header`.
+pub(crate) const HEADER_FIXED_FLAGS_OFFSET: usize = 0;
+pub(crate) const HEADER_FIXED_RECIPIENT_COUNT_OFFSET: usize =
+    HEADER_FIXED_FLAGS_OFFSET + size_of::<u16>();
+pub(crate) const HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET: usize =
     HEADER_FIXED_RECIPIENT_COUNT_OFFSET + size_of::<u16>();
-const HEADER_FIXED_EXT_LEN_OFFSET: usize =
+pub(crate) const HEADER_FIXED_EXT_LEN_OFFSET: usize =
     HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET + size_of::<u32>();
-const HEADER_FIXED_STREAM_NONCE_OFFSET: usize = HEADER_FIXED_EXT_LEN_OFFSET + size_of::<u32>();
+pub(crate) const HEADER_FIXED_STREAM_NONCE_OFFSET: usize =
+    HEADER_FIXED_EXT_LEN_OFFSET + size_of::<u32>();
 const _: () = assert!(HEADER_FIXED_STREAM_NONCE_OFFSET + STREAM_NONCE_SIZE == HEADER_FIXED_SIZE);
 
 /// Parsed `header_fixed` (31-byte fixed section at the start of `header`).

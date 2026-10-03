@@ -315,13 +315,27 @@ impl KdfParams {
     pub(crate) fn from_bytes_structural(
         bytes: &[u8; KDF_PARAMS_SIZE],
     ) -> Result<Self, CryptoError> {
-        let params = Self {
+        let params = Self::read_fields(bytes)?;
+        params.validate_structural()?;
+        Ok(params)
+    }
+
+    /// The three parameters as stored, with no bound checked.
+    fn read_fields(bytes: &[u8; KDF_PARAMS_SIZE]) -> Result<Self, CryptoError> {
+        Ok(Self {
             mem_cost: read_u32_be(bytes, KDF_MEM_COST_OFFSET)?,
             time_cost: read_u32_be(bytes, KDF_TIME_COST_OFFSET)?,
             lanes: read_u32_be(bytes, KDF_LANES_OFFSET)?,
-        };
-        params.validate_structural()?;
-        Ok(params)
+        })
+    }
+
+    /// Parses wire bytes without checking any bound, for a test that judges
+    /// the stored numbers itself. The result is not fit to run Argon2id on.
+    #[cfg(test)]
+    pub(crate) fn from_bytes_unvalidated(
+        bytes: &[u8; KDF_PARAMS_SIZE],
+    ) -> Result<Self, CryptoError> {
+        Self::read_fields(bytes)
     }
 
     /// Applies the caller-supplied resource caps (memory, time cost, lanes)

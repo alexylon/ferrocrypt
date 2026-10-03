@@ -27,8 +27,10 @@ use ferrocrypt::{
     validate_private_key_file,
 };
 use ferrocrypt_test_support::wire_manifest::{
-    DEFAULT_LIMIT_PROFILE_ID, DIGEST_PAIRS, Row, SMALL_ARTIFACT_LIMIT_PROFILE_ID, corpus_files,
-    is_lower_hex, is_structural_corpus_file, read_committed, read_table, sha3_hex, table_columns,
+    CAP_COLUMN_PREFIX, DEFAULT_LIMIT_PROFILE_ID, DIGEST_PAIRS, Row,
+    SMALL_ARTIFACT_LIMIT_PROFILE_ID, cases_withdrawn_by_errata, corpus_files, corpus_revision,
+    field, is_lower_hex, is_structural_corpus_file, limit_value, read_committed, read_table,
+    sha3_hex, table_columns,
 };
 
 /// Capabilities this build supports beyond the `0.3.0` baseline. A
@@ -54,11 +56,6 @@ fn corpus_root() -> PathBuf {
 /// which CI runs as a job of its own.
 fn corpus_present() -> bool {
     corpus_root().is_dir()
-}
-
-fn field<'a>(row: &'a Row, column: &str) -> &'a str {
-    row.get(column)
-        .unwrap_or_else(|| panic!("missing column {column}"))
 }
 
 /// Collects one column into a set, refusing a repeated value. §12.3 requires
@@ -92,15 +89,6 @@ fn assert_revisions_within(table: &[Row], name: &str, revision: u32) {
     }
 }
 
-/// The corpus revision `CORPUS-REVISION` records.
-fn corpus_revision(root: &Path) -> u32 {
-    fs::read_to_string(root.join("CORPUS-REVISION"))
-        .expect("read CORPUS-REVISION")
-        .trim()
-        .parse()
-        .expect("CORPUS-REVISION is a number")
-}
-
 /// Why the replay leaves a case row unasserted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unasserted {
@@ -120,21 +108,6 @@ fn unasserted(row: &Row, withdrawn: &BTreeSet<String>) -> Option<Unasserted> {
     let capability = field(row, "capability_id");
     (capability != "-" && DECLARED_CAPABILITIES.contains(&capability))
         .then_some(Unasserted::DeclaredCapability)
-}
-
-/// Case IDs an erratum withdraws from replay at the current revision. §12.3
-/// keeps the row and its history in place; only the replay stops asserting it.
-fn cases_withdrawn_by_errata(root: &Path, revision: u32) -> BTreeSet<String> {
-    read_table(root, "errata.tsv")
-        .iter()
-        .filter(|row| {
-            let effective: u32 = field(row, "effective_corpus_revision")
-                .parse()
-                .expect("errata.tsv: effective_corpus_revision is not a number");
-            effective <= revision
-        })
-        .map(|row| field(row, "affected_case_id").to_string())
-        .collect()
 }
 
 /// Maps a typed error to its `FORMAT.md` §12.1 diagnostic class. Structured
@@ -281,7 +254,7 @@ fn read_limit_profiles(table: &[Row]) -> BTreeMap<String, LimitProfile> {
     let limit_columns: BTreeSet<&str> = table_columns("limit-profiles.tsv")
         .iter()
         .copied()
-        .filter(|c| c.starts_with("max_"))
+        .filter(|c| c.starts_with(CAP_COLUMN_PREFIX))
         .collect();
     let mut profiles = BTreeMap::new();
     for row in table {
@@ -332,14 +305,6 @@ fn read_limit_profiles(table: &[Row]) -> BTreeMap<String, LimitProfile> {
         );
     }
     profiles
-}
-
-/// The value a `limit-profiles.tsv` row gives limit `column`.
-fn limit_value(row: &Row, column: &str) -> u64 {
-    field(row, column).parse().unwrap_or_else(|_| {
-        let id = field(row, "limit_profile_id");
-        panic!("{id}: {column} is not a decimal limit")
-    })
 }
 
 /// The class a reader reports for a file one unit past limit `column`: a TLV
@@ -845,7 +810,7 @@ fn every_cap_a_profile_changes_is_what_a_case_needs() {
     let columns: Vec<&str> = table_columns("limit-profiles.tsv")
         .iter()
         .copied()
-        .filter(|column| column.starts_with("max_"))
+        .filter(|column| column.starts_with(CAP_COLUMN_PREFIX))
         .collect();
 
     let small = profile_row(SMALL_ARTIFACT_LIMIT_PROFILE_ID);

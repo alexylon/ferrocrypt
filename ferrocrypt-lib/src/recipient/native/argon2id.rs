@@ -42,7 +42,7 @@ pub(crate) const BODY_LENGTH: usize =
 pub(crate) const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/argon2id/wrap";
 
 const SALT_OFFSET: usize = 0;
-const KDF_PARAMS_OFFSET: usize = SALT_OFFSET + ARGON2_SALT_SIZE;
+pub(crate) const KDF_PARAMS_OFFSET: usize = SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 

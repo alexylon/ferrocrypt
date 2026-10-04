@@ -1,7 +1,8 @@
-//! Stable reason fragments for the three archive rejection variants:
+//! Reason fragments for the three archive rejection variants:
 //! [`crate::CryptoError::MalformedArchive`],
 //! [`crate::CryptoError::UnsafeArchivePath`], and
-//! [`crate::CryptoError::InvalidArchiveTree`].
+//! [`crate::CryptoError::InvalidArchiveTree`]. They are wording for people,
+//! not stable identifiers, and may be reworded in any release.
 //!
 //! Every crate-owned archive reason belongs in this registry. The declaration
 //! macro validates each fragment against the display policy at compile time,

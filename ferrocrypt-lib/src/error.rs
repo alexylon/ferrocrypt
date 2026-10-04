@@ -364,11 +364,12 @@ impl std::fmt::Display for PathSuffix<'_> {
 /// - The archive defect variants ([`CryptoError::MalformedArchive`],
 ///   [`CryptoError::UnsafeArchivePath`],
 ///   [`CryptoError::InvalidArchiveTree`]) carry a static `reason`
-///   describing the violated rule; the path-carrying ones also carry
-///   the offending entry path, sanitized for display (control and
-///   non-ASCII characters escaped, long paths truncated), because an
-///   attacker-crafted archive can hold thousands of entries and the
-///   path is the only way to locate the bad one
+///   describing the violated rule in words for people, which may change
+///   in any release (the variant is the stable category); the
+///   path-carrying ones also carry the offending entry path, sanitized
+///   for display (control and non-ASCII characters escaped, long paths
+///   truncated), because an attacker-crafted archive can hold thousands
+///   of entries and the path is the only way to locate the bad one
 /// - The multi-recipient diagnostics ([`CryptoError::RecipientUnwrapFailed`],
 ///   [`CryptoError::HeaderMacFailedAfterUnwrap`],
 ///   [`CryptoError::UnknownCriticalRecipient`],
@@ -376,7 +377,8 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   `type_name` so callers can tell which recipient slot raised them
 ///
 /// Consumers can pattern-match on these shapes without substring
-/// comparisons.
+/// comparisons. Which rule failed inside one archive variant is named only
+/// by its `reason` text and is not part of that stable shape.
 ///
 /// # Evolution
 ///
@@ -787,17 +789,21 @@ pub enum CryptoError {
     // ─── Archive payload (FCA) ───────────────────────────────────────────
     /// Inner FCA archive header or manifest is structurally invalid:
     /// bad magic, reserved flags set, no entries declared, truncated or
-    /// over-declared regions, a length-field overflow, trailing
-    /// manifest or content bytes, an unknown entry kind, a directory
-    /// entry declaring a size, an out-of-range mode word, a non-UTF-8
-    /// or empty entry path, or a declared total that does not match the
-    /// entry sizes. Fires inside the encrypted payload after the outer
-    /// container is accepted, and from the writer gate when a caller
-    /// hands the archive writer data it could never read back. The
-    /// `reason` names the violated rule. Per `FORMAT.md` §9.
+    /// over-declared regions, a length-field overflow, a declared length
+    /// or count this platform cannot hold, trailing manifest or content
+    /// bytes, an unknown entry kind, a directory entry declaring a size,
+    /// an out-of-range mode word, a non-UTF-8 or empty entry path, or a
+    /// declared total that does not match the entry sizes. Fires inside
+    /// the encrypted payload after the outer container is accepted, and
+    /// from the writer gate when a caller hands the archive writer data it
+    /// could never read back, such as an entry value too large for its
+    /// wire field. The `reason` says which rule failed. Per `FORMAT.md` §9.
     #[error("Malformed archive: {reason}")]
     MalformedArchive {
-        /// The specific `FORMAT.md` §9 rule the payload violated.
+        /// The rule that failed, worded for people. The text is not a stable
+        /// identifier and may change in any release. The variant is the
+        /// stable category; when an archive is read, it is the `FORMAT.md`
+        /// §12.1 class `malformed_archive`.
         reason: &'static str,
     },
     /// An archive entry path violates the `FORMAT.md` §9.6 grammar
@@ -810,18 +816,26 @@ pub enum CryptoError {
         /// Offending entry path, sanitized for display (control and
         /// non-ASCII characters escaped, long input truncated).
         path: String,
-        /// The specific `FORMAT.md` §9.6 rule the path violated.
+        /// The `FORMAT.md` §9.6 rule the path broke, worded for people. The
+        /// text is not a stable identifier and may change in any release.
+        /// The variant is the stable category; when an archive is read, it
+        /// is the `FORMAT.md` §12.1 class `unsafe_archive_path`.
         reason: &'static str,
     },
     /// The archive manifest violates the `FORMAT.md` §9.7/§9.8 tree
-    /// rules: duplicate entries (exact or ASCII-case-insensitive),
-    /// multiple top-level roots, a missing parent or root entry, or a
-    /// child under a file path.
+    /// rules: duplicate entries (exact, ASCII-case-insensitive, or
+    /// differing only in Unicode form), multiple top-level roots, a missing
+    /// parent or root entry, or a child under a file path. Fires on read for
+    /// a malicious or corrupt archive and on write for a source tree FCA
+    /// cannot represent, such as two names that differ only in letter case.
     #[error("Invalid archive tree ({reason}): {path}")]
     InvalidArchiveTree {
         /// Entry path that exposed the violation, sanitized for display.
         path: String,
-        /// The specific tree rule the manifest violated.
+        /// The tree rule the manifest broke, worded for people. The text is
+        /// not a stable identifier and may change in any release. The
+        /// variant is the stable category; when an archive is read, it is
+        /// the `FORMAT.md` §12.1 class `invalid_archive_tree`.
         reason: &'static str,
     },
     /// Archive entry count exceeds the configured

@@ -2049,7 +2049,7 @@ mod tests {
         assert!(matches!(
             err,
             CryptoError::UnsafeArchivePath {
-                reason: "Windows-reserved device name",
+                reason: crate::archive::reasons::COMPONENT_RESERVED_DEVICE_NAME,
                 ..
             }
         ));

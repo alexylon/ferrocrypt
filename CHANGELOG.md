@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Decrypting a folder on macOS no longer reports success when its final flush to disk could not run.** Some of the reasons it could not run were taken to mean that the filesystem cannot flush folders at all, so the decrypt reported success although a power loss soon after could still lose the decrypted files. Such a failure now stops the decrypt before the folder gets its final name. Only a filesystem that reports the operation as unsupported is still treated as unable to flush folders. Key generation on Unix systems other than Linux and macOS follows the same rule for its folder flush.
+
 ## [0.3.0-rc.5] - 2026-10-04
 
 ### Added

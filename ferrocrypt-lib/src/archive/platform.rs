@@ -467,15 +467,14 @@ fn rename_at_no_clobber_via_claim_with(
 /// also uses it after a handle-relative rename to make the rename
 /// durable.
 ///
-/// cap-std may hold `dir` as an `O_PATH` handle on Linux, where
-/// `fsync` fails with `EBADF`. The helper therefore opens `.` relative
-/// to `dir` and syncs that fresh read-only handle. This avoids ambient
-/// path resolution and works whether or not `dir` itself is `O_PATH`.
-/// Failures are ignored because this durability hint must not turn a
-/// completed operation into an error.
+/// The flush goes through a handle from
+/// [`crate::fs::atomic::reopen_dir_for_flush`], because `dir` itself may
+/// be an `O_PATH` handle that `fsync` refuses. Failures are ignored
+/// because this durability hint must not turn a completed operation into
+/// an error.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn sync_dir_handle(dir: &Dir) {
-    if let Ok(sync_fd) = open_dir_sync_fd(dir) {
+    if let Ok(sync_fd) = crate::fs::atomic::reopen_dir_for_flush(dir) {
         let _ = crate::fs::atomic::fsync_uninterrupted(&sync_fd);
     }
 }
@@ -495,30 +494,6 @@ pub(crate) fn sync_dir_handle(dir: &Dir) {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn sync_dir_handle(_dir: &Dir) {}
 
-/// Opens `.` relative to a capability directory for a subsequent sync.
-///
-/// cap-std may represent a directory with an `O_PATH` handle on Linux,
-/// which cannot itself be passed to `fsync`. Reopening `.` supplies a
-/// syncable read handle without resolving an ambient path. The open is
-/// retried on `EINTR` so callers do not silently lose or spuriously fail
-/// a durability barrier when a signal arrives.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_dir_sync_fd(dir: &Dir) -> io::Result<rustix::fd::OwnedFd> {
-    use std::os::fd::AsFd;
-
-    use rustix::fs::{Mode, OFlags, openat};
-
-    rustix::io::retry_on_intr(|| {
-        openat(
-            dir.as_fd(),
-            ".",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-    })
-    .map_err(io::Error::from)
-}
-
 /// Completes the extraction-side durability sequence before a staged
 /// directory is promoted.
 ///
@@ -530,26 +505,19 @@ fn open_dir_sync_fd(dir: &Dir) -> io::Result<rustix::fd::OwnedFd> {
 /// one full-device barrier per directory decrypt, rather than one per
 /// extracted file.
 ///
-/// Filesystems that do not support `F_FULLFSYNC` fall back to plain
-/// `fsync`, matching the strongest behavior available before the batched
-/// barrier. Genuine open or sync failures are returned so extraction
-/// stops before promotion. Other targets need no extra barrier: Linux
-/// `fsync` already has the semantics its `sync_all` path used, while
-/// Windows keeps `FlushFileBuffers` on every extracted file.
+/// The flush is the required directory flush,
+/// [`crate::fs::atomic::sync_dir_durable_at`], whose full flush on macOS is
+/// an explicit `F_FULLFSYNC`. A filesystem that does not support
+/// `F_FULLFSYNC` falls back to plain `fsync`, matching the strongest
+/// behavior available before the batched barrier, and a filesystem without
+/// directory flushing counts as flushed. Genuine open or flush failures are
+/// returned so extraction stops before promotion. Other targets need no
+/// extra barrier: on Linux the full flush is plain `fsync`, which every
+/// extracted file has already received, while Windows keeps
+/// `FlushFileBuffers` on every extracted file.
 #[cfg(target_os = "macos")]
 pub(crate) fn sync_extraction_barrier(dir: &Dir) -> io::Result<()> {
-    let sync_fd = match open_dir_sync_fd(dir) {
-        Ok(sync_fd) => sync_fd,
-        Err(e) if crate::fs::atomic::dir_sync_unsupported(&e) => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    crate::fs::atomic::flush_dir_with_fallback(
-        || {
-            rustix::io::retry_on_intr(|| rustix::fs::fcntl_fullfsync(&sync_fd))
-                .map_err(io::Error::from)
-        },
-        || crate::fs::atomic::fsync_uninterrupted(&sync_fd),
-    )
+    crate::fs::atomic::sync_dir_durable_at(dir)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -943,15 +911,16 @@ pub(crate) fn sync_file_standard(file: &File) -> io::Result<()> {
 /// Strongest available flush for a single-file extraction.
 ///
 /// A single-file root has no per-entry scaling cost, so it keeps the
-/// original `sync_all` behavior: macOS `F_FULLFSYNC`, Linux `fsync`, and
-/// Windows `FlushFileBuffers`. Filesystems that reject the macOS full
+/// strongest flush: `F_FULLFSYNC` on macOS
+/// (`fs::atomic::full_fsync_uninterrupted`), `fsync` on Linux, and
+/// `FlushFileBuffers` on Windows. Filesystems that reject the macOS full
 /// flush fall back to plain `fsync`, matching the encrypted-output and
 /// key-file durability policy.
 pub(crate) fn sync_single_file_durable(file: &File) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         crate::fs::atomic::flush_file_with_fallback(
-            || file.sync_all(),
+            || crate::fs::atomic::full_fsync_uninterrupted(file),
             || crate::fs::atomic::fsync_uninterrupted(file),
         )
     }
@@ -1064,7 +1033,7 @@ pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()>
 /// chmod is returned.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn chmod_dir_handle_durable(dir: Dir, mode: u32) -> Result<(), CryptoError> {
-    let sync_fd = open_dir_sync_fd(&dir).ok();
+    let sync_fd = crate::fs::atomic::reopen_dir_for_flush(&dir).ok();
     chmod_dir_handle(dir, mode)?;
     if let Some(sync_fd) = sync_fd {
         let _ = crate::fs::atomic::fsync_uninterrupted(&sync_fd);

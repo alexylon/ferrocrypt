@@ -621,9 +621,9 @@ fn extract_directory_root<R: Read>(
     platform::sync_dir_handle(&root_dir);
 
     // The per-file and per-directory calls above are plain `fsync` on
-    // macOS. Complete them with one full drive-cache barrier for the
-    // staged operation, preserving the pre-A2 strongest-available
-    // durability without paying for `F_FULLFSYNC` once per file.
+    // macOS. One full drive-cache barrier for the staged operation then
+    // gives the strongest durability available, without an `F_FULLFSYNC`
+    // per file.
     platform::sync_extraction_barrier(&root_dir).map_err(CryptoError::Io)?;
 
     // root_dir is dropped here, before promotion: on Windows a cap-std

@@ -167,6 +167,8 @@ if (-not (Test-Path Env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS)) {
     $env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS = "1"
 }
 Note "workspace"
+# The skip list matches the CI `build` job's in .github/workflows/rust.yml,
+# whose comment names every copy of it.
 cargo test -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip regenerate_wire_corpus --skip round_trip_file_larger_than_4gib
 Record "workspace" ($LASTEXITCODE -eq 0)
 

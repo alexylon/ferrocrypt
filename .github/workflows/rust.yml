@@ -50,15 +50,21 @@ jobs:
         # `regenerate_fixtures` deletes and rewrites
         # `tests/fixtures/`, racing against the four
         # `decrypt_*_fixture_matches_source` tests when run alongside
-        # them; `regenerate_suite_vectors` rewrites
-        # `testvectors/suite/` — running it here would make
-        # `testvector_suite` replay the freshly generated corpus
-        # instead of the committed one the corpus exists to pin; and
+        # them; `regenerate_suite_vectors` and `regenerate_wire_corpus`
+        # rewrite `testvectors/suite/` and `testvectors/wire/` — running
+        # them here would make the replays check freshly generated
+        # corpora instead of the committed ones the corpora exist to
+        # pin; and
         # `round_trip_file_larger_than_4gib` moves >4 GiB through real
         # I/O (minutes and ~8 GiB of disk), so every push skips it. It runs
-        # as a release gate instead (the `large-file` job in `release.yml`),
-        # and locally via `FERROCRYPT_GAUNTLET_LARGE_FILE=1` in
-        # `scripts/run_all_tests.sh`.
+        # for a release instead, in `scripts/release_hook.sh` and in the
+        # `large-file` job in `release.yml`, and locally via
+        # `FERROCRYPT_GAUNTLET_LARGE_FILE=1` in `scripts/run_all_tests.sh`.
+        #
+        # The same skip list is in the `musl` job below, in
+        # `scripts/run_all_tests.sh` and `scripts/run_all_tests.ps1`, and in
+        # `scripts/release_hook.sh`, which runs these tests before every
+        # release commit. Keep every copy the same.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
         run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip regenerate_wire_corpus --skip round_trip_file_larger_than_4gib
@@ -73,7 +79,7 @@ jobs:
   #
   # The command matches the `build` job's, so this lane carries the same
   # coverage rather than a reduced version of it; see the comment there
-  # for what each `--skip` excludes.
+  # for what each `--skip` excludes and for every copy of the skip list.
   musl:
     strategy:
       fail-fast: false
@@ -271,9 +277,11 @@ jobs:
   # Public-API compatibility gate for the `ferrocrypt` library.
   # Two baselines, because neither covers the whole line on its own.
   #
-  # The newest release tag guards the current series: the comparison is
+  # The newest release tag before the commit guards the current series
+  # (for a release commit, the release before it): the comparison is
   # forced to patch level, so any incompatible change since that tag
-  # fails, which is what keeps an API freeze frozen.
+  # fails, which is what keeps an API freeze frozen. RELEASE.md says what
+  # a version that changes the API on purpose needs here.
   #
   # The latest stable release on crates.io guards what users have
   # installed. Pre-release versions promise nothing, so they are never
@@ -299,9 +307,11 @@ jobs:
       - name: Install cargo-semver-checks
         run: cargo install --locked cargo-semver-checks
 
-      - name: Resolve the newest release tag as the freeze baseline
+      - name: Resolve the newest earlier release tag as the freeze baseline
+        # From the parent commit, so that a release commit is compared with
+        # the release before it rather than with its own tag.
         run: |
-          baseline_rev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD || true)"
+          baseline_rev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ || true)"
           if [ -z "$baseline_rev" ]; then
             echo "No release tag found to compare against." >&2
             exit 1
@@ -309,7 +319,7 @@ jobs:
           echo "Freeze baseline: $baseline_rev"
           echo "SEMVER_BASELINE_REV=$baseline_rev" >> "$GITHUB_ENV"
 
-      - name: Check the public API against the newest release tag
+      - name: Check the public API against that release tag
         # `--release-type patch` states that this revision promises
         # compatibility with the tag, so every lint runs instead of
         # being skipped as it is on a major-equivalent bump.

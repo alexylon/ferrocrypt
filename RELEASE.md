@@ -1,175 +1,263 @@
-# Release Process Guide
+# Releasing
 
-This project uses **cargo-release** to automate the release workflow for both `ferrocrypt` (library) and `ferrocrypt-cli` crates simultaneously.
-
-## Setup
-
-Install cargo-release if not already installed:
-
-```bash
-cargo install cargo-release
-```
-
-The configuration is in `release.toml`. Both crates share the same version and are released together.
-
-## Release Commands
-
-### 1. Dry Run (Recommended First Step)
-Preview what will happen without making changes:
+cargo-release makes a release on your machine, and the release workflow checks,
+builds, and publishes it. The settings are in `release.toml`,
+`ferrocrypt-lib/release.toml`, and `.github/workflows/release.yml`. The order of
+the steps on your machine was checked against the source of cargo-release
+1.1.6, the version this installs; check it again before you upgrade.
 
 ```bash
-cargo release patch
+cargo install --locked cargo-release@1.1.6
 ```
 
-This shows:
-- Version bump for both crates (e.g., 0.2.5 → 0.2.6)
-- Files to be modified
-- Git operations
-- Publishing steps (lib first, then CLI)
+## Once, before the first release from the workflow
 
-### 2. Perform Release
-Execute the full release workflow:
+The workflow publishes to crates.io with a short-lived token that crates.io
+gives it for each run, so no publishing token has to be stored, on GitHub or on
+your machine. Before the first such release, make crates.io trust the workflow,
+and limit on GitHub who can start it:
+
+1. On crates.io, in the settings of `ferrocrypt` and then of `ferrocrypt-cli`,
+   under Trusted Publishing, add GitHub with the owner `alexylon`, the
+   repository `ferrocrypt`, the workflow `release.yml`, and the environment
+   `release`.
+2. On GitHub, in the repository's Settings, click Environments in the left
+   sidebar and create the environment `release`. In its "Deployment branches"
+   dropdown, choose "Selected branches and tags", and add a rule of the ref
+   type Tag for `v*`. Then only a run that a release tag started can publish.
+   If you also add yourself under "Required reviewers", each publish waits for
+   your approval on the run's page.
+3. On GitHub, in the repository's Settings, click Rulesets in the left sidebar
+   and create a new tag ruleset that targets tags matching `v*`, with the rules
+   "Restrict creations", "Restrict updates", "Restrict deletions", and "Block
+   force pushes", and with Repository admin in its bypass list. Then only a
+   repository admin can create, move, or delete a release tag, and so start a
+   release.
+4. After the first release that the workflow publishes, tick "Require trusted
+   publishing for all new versions" in the settings of both crates on
+   crates.io, and revoke the API token your machine used to publish, at
+   <https://crates.io/settings/tokens>. Then only the workflow can publish
+   them.
+
+## Making a release
+
+First, see what the release would do. Without `--execute`, nothing is changed
+and the tests do not run:
 
 ```bash
-cargo release patch --execute
+cargo release rc
 ```
 
-This automatically:
-1. Bumps version in both `Cargo.toml` files
-2. Updates the CLI's dependency version on the lib
-3. Runs tests: `cargo test`
-4. Updates `CHANGELOG.md`
-5. Publishes `ferrocrypt` (lib) to crates.io
-6. Publishes `ferrocrypt-cli` to crates.io
-7. Creates release commit: `"Release vX.Y.Z"`
-8. Creates Git tag: `vX.Y.Z`
-9. Pushes commits and tags to remote
-
-### 3. Release with Specific Version
-Bump to a specific version (major, minor, patch):
+Then make the release:
 
 ```bash
-# Patch release (0.2.5 → 0.2.6)
-cargo release patch --execute
-
-# Minor release (0.2.5 → 0.3.0)
-cargo release minor --execute
-
-# Major release (0.2.5 → 1.0.0)
-cargo release major --execute
+cargo release rc --execute
 ```
 
-**Note:** Always pass either a version level (`patch` / `minor` / `major` / `alpha` / `beta` / `rc` / `release`) or an explicit version string (e.g., `0.3.0-beta.1`). Running `cargo release` without an argument will try to re-release the current version.
+That one command, in this order:
 
-### 4. Pre-release (alpha / beta / rc)
-For shipping a pre-release version (e.g., `0.3.0-beta.1`) before the final `0.3.0`:
+1. Sets the new version of `ferrocrypt`, `ferrocrypt-cli`, and
+   `ferrocrypt-test-support` in their `Cargo.toml` files and in `Cargo.lock`,
+   and the CLI's dependency on the library to match.
+2. Moves everything under `## [Unreleased]` in `CHANGELOG.md` into a section
+   for the new version, dated with today's date in UTC, and sets the same
+   version in `ferrocrypt-desktop/Cargo.toml` and in `README.md`, the
+   crates.io page of both crates, in its links to the version and its install
+   commands.
+3. Runs `scripts/release_hook.sh`, which records the new versions in the lock
+   files of the desktop app and the fuzz targets, runs the workspace tests as
+   every push runs them in CI, then runs the >4 GiB round trip at its full
+   size, whatever `FERROCRYPT_LARGE_FILE_BYTES` says. It stops the release if a
+   lock file records other dependency versions than the last commit, if a test
+   fails, or if a test changed a file that the commit would include.
+4. Commits all of it as `Release X.Y.Z`.
+5. Tags `vX.Y.Z`.
+6. Pushes the commit and the tag together: both or neither.
+
+It prints a `Publishing` line, but it packages and uploads nothing: the
+workflow publishes.
+
+The tag starts `.github/workflows/release.yml`, which:
+
+1. Runs every check a push gets on the tagged commit, fuzzes every target for
+   60 seconds, and runs the >4 GiB round trip. Checks that the tag names the
+   version of every published crate and of the desktop app, that the CLI
+   requires that version of the library, and that `PUBLISHED_CRATES` in the
+   workflow names exactly the crates that can be published. Packages and
+   builds those crates as crates.io will receive them.
+2. Builds the CLI and the desktop app for Linux, macOS (Intel and Apple
+   silicon), and Windows, and the static Linux CLI for x86-64 and arm64, which
+   it also checks for shared libraries and runs on Alpine.
+3. Checks that the tag still names its commit, that the commit is on `main`,
+   and that it packages the crates exactly as step 1 built them. Then it
+   publishes `ferrocrypt` to crates.io, then `ferrocrypt-cli`.
+4. Checks the tag and `main` again, then creates a GitHub release with the
+   archives, marked as a pre-release when the version has a suffix such as
+   `-rc.5`.
+
+Nothing reaches crates.io unless every check and build has passed.
+
+A new crate to publish goes into `PUBLISHED_CRATES` in
+`.github/workflows/release.yml`. Until it is there, or until its `Cargo.toml`
+sets `publish = false`, the version check stops every release. crates.io
+trusts a workflow only for a crate it already has, so publish the crate's
+first version by hand, with an API token that you revoke afterwards, and add
+its trusted publisher as in step 1 above. Until then, the workflow stops
+before it uploads anything.
+
+## Choosing the version
+
+Pass `patch`, `minor`, or `major`; or `alpha`, `beta`, or `rc` for the next
+pre-release of that kind, such as `0.3.0-rc.4` to `0.3.0-rc.5`; or an exact
+version, such as `0.3.0-rc.5`. `cargo release release` drops the pre-release
+suffix: `0.3.0-rc.5` becomes `0.3.0`. On its own, `cargo release` tries to
+release the version already in `Cargo.toml`.
+
+On a version without a suffix, `alpha`, `beta`, and `rc` move to the next
+patch version: `0.3.0` becomes `0.3.1-rc.1`. For the first pre-release of a
+new minor or major version, pass the exact version, such as `0.4.0-rc.1`.
+
+The tag carries the suffix too, such as `v0.3.0-rc.5`. Cargo chooses a
+pre-release only for a requirement that names one, such as
+`ferrocrypt = "0.3.0-rc.5"`, and that requirement also accepts the later
+pre-releases of `0.3.0`. Semantic Versioning allows incompatible changes
+between pre-releases.
+
+The `semver` job in `.github/workflows/rust.yml` freezes the library's public
+API: on every push and on every release, it refuses any incompatible change
+since the newest release tag before the commit. A version that changes the API
+on purpose, such as `0.4.0` after `0.3.x`, needs that job's
+`--release-type patch` changed to `--release-type major` first. For a `0.x`
+version, cargo-semver-checks counts a change of the second number, such as
+`0.3` to `0.4`, as major.
+
+## Before you start
+
+- On `main`, with everything committed and nothing untracked: `git status`.
+  cargo-release refuses to start otherwise.
+- Formatted: after `./scripts/fmt.sh`, `git status` still shows nothing. It
+  also formats the desktop app and the fuzz targets, which CI does not check.
+- Everything pushed, and the CI run of the last commit passed. The release
+  runs all those checks again on the tagged commit, and a failure there means
+  moving the tag.
+- Anything worth reading about is under `## [Unreleased]` in `CHANGELOG.md`.
+  The release does not write it.
+- No confirmed release blocker remains under
+  [`THREAT_MODEL.md` section 6](THREAT_MODEL.md#6-release-and-review-governance)
+- About 8 GiB of free disk for the >4 GiB round trip
+- For a release without a pre-release suffix: `README.md` no longer describes
+  a pre-release, in its status note and beside its install commands. The
+  release changes only the version numbers.
+
+The tests need no run of their own: the release runs them. To run them alone,
+for example before you start, use `./scripts/release_hook.sh`. If it changes
+`ferrocrypt-desktop/Cargo.lock` or `ferrocrypt-lib/fuzz/Cargo.lock`, commit
+them before you start.
+
+## Committing and tagging without pushing
 
 ```bash
-# First pre-release — specify the exact version
-cargo release 0.3.0-beta.1 --execute
-
-# Subsequent pre-releases — bumps the suffix automatically
-cargo release beta --execute     # 0.3.0-beta.1 → 0.3.0-beta.2
-
-# Promote to final release — drops the pre-release suffix
-cargo release release --execute  # 0.3.0-beta.N → 0.3.0
+cargo release rc --execute --no-push
 ```
 
-The same workflow applies with `alpha` or `rc` identifiers (`0.3.0-alpha.1`, `0.3.0-rc.1`).
-
-**Notes:**
-- The Git tag includes the suffix: `v0.3.0-beta.1`.
-- Cargo does not auto-select pre-releases. Consumers must opt in by writing the exact version in their `Cargo.toml` (e.g., `ferrocrypt = "0.3.0-beta.1"`).
-- Breaking changes are allowed between pre-releases and before the final release (semver treats pre-release versions as unstable by design).
-
-### 5. Release Without Publishing to crates.io
-If you want to skip publishing:
+Push the commit and the tag later, both together:
 
 ```bash
-cargo release patch --execute --no-publish
+git push --atomic origin HEAD vX.Y.Z
 ```
 
-### 6. Release Without Pushing to Git
-For testing/staging:
+## The desktop app's version
 
-```bash
-cargo release patch --execute --no-push
-```
+`ferrocrypt-desktop` is excluded from the Cargo workspace, so the shared version
+does not cover it. A rule in `ferrocrypt-lib/release.toml` sets its version in
+its `Cargo.toml`, which the installers use; the rule sets `prerelease = true`,
+without which cargo-release skips it for a pre-release. The version shown in
+the app window comes from the library (`ferrocrypt::VERSION`), so it is right
+even if the rule is skipped. The release workflow's version check stops the
+release if the desktop app's `Cargo.toml` does not match the tag.
 
-## What Gets Updated
+The release hook records the new versions in the `Cargo.lock` files of the
+app and of the fuzz targets, which are outside the workspace too.
 
-### Files Modified Automatically
-- **ferrocrypt-lib/Cargo.toml**: Version number
-- **ferrocrypt-cli/Cargo.toml**: Version number + dependency version
-- **CHANGELOG.md**: New release section with date
-- **ferrocrypt-desktop/Cargo.toml**: Version number (see "Desktop app version" below)
-- **Git**: Creates commit and annotated tag
+## If something fails
 
-### Publish Order
-1. `ferrocrypt` (library) — published first since CLI depends on it
-2. `ferrocrypt-cli` — published after the lib is available on crates.io
+On your machine, before anything was pushed:
 
-### Desktop app version
+- There is no release commit, and files are left changed: the release
+  stopped before its commit, usually in the hook. Put back the files the
+  release changed:
 
-`ferrocrypt-desktop` is excluded from the Cargo workspace, so cargo-release's
-shared-version does not bump it automatically. Two things keep it correct:
+  ```bash
+  git checkout -- Cargo.lock CHANGELOG.md README.md ferrocrypt-lib/Cargo.toml \
+      ferrocrypt-cli/Cargo.toml ferrocrypt-test-support/Cargo.toml \
+      ferrocrypt-desktop/Cargo.toml ferrocrypt-desktop/Cargo.lock \
+      ferrocrypt-lib/fuzz/Cargo.lock
+  ```
 
-- **Its `Cargo.toml` version** — used for the macOS / Linux / Windows installer
-  metadata — is rewritten by a `[[pre-release-replacements]]` rule in
-  `ferrocrypt-lib/release.toml`, which sets `prerelease = true` (without that,
-  cargo-release silently skips the rewrite on `-beta` / `-rc` releases).
-- **The version shown in the app window** is read from the library at runtime
-  (`ferrocrypt::VERSION`), so it always matches the released version even if the
-  manifest rewrite is somehow skipped.
+  If the hook says that a test changed a file, `git status` shows which; find
+  out why before you put it back. If it says that a lock file records other
+  dependency versions than the last commit, a `Cargo.toml` changed without its
+  lock file: put the release's files back, bring that lock file up to date in
+  a commit of its own, push it, and start again.
 
-As a backstop, the `desktop-version` job in `.github/workflows/release.yml` fails
-the release if `ferrocrypt-desktop/Cargo.toml` does not match the pushed tag. If
-that happens, bump `ferrocrypt-desktop/Cargo.toml` to the tag version, then
-delete and re-push the tag.
+- The last commit is `Release X.Y.Z`, but the push failed. Push again once the
+  cause is fixed, with the command under "Committing and tagging without
+  pushing". Or undo the tag and the commit:
 
-## Before Release
+  ```bash
+  git tag -d vX.Y.Z
+  git reset --hard HEAD~1
+  ```
 
-Ensure:
-1. All changes are committed: `git status`
-2. Tests pass: `cargo test`
-3. The large-file round trip passes (see below)
-4. No confirmed release blocker remains under
-   [`THREAT_MODEL.md` section 6](THREAT_MODEL.md#6-release-and-review-governance)
-5. Code is formatted: `./scripts/fmt.sh`
-6. You have push access to the remote repository
-7. crates.io credentials are configured: `cargo login`
+  Only when `git log -1 --oneline` shows the release commit, and nothing else
+  is uncommitted: otherwise this throws away work of your own.
 
-### Large-file round trip
+In the release workflow, after the push:
 
-`tests/large_file.rs` moves a payload just over 4 GiB through a full encrypt
-and decrypt. It is the only coverage for size accounting above `u32::MAX`, and
-it is `#[ignore]`d by design, so the CI test lane skips it. Run it by hand
-against the candidate, on a machine with a few spare GiB of disk:
+- A job failed because of a temporary problem, such as a download that timed
+  out: open the run on the Actions page and choose to re-run the failed jobs.
+- A check, the version check, the packaging, or a build failed for a real
+  reason: nothing was published. Fix it in a new commit, push it, and move the
+  tag to it. Pushing the moved tag starts the workflow again:
 
-```bash
-cargo test -p ferrocrypt --release --test large_file -- --ignored --test-threads=1
-```
+  ```bash
+  git push origin HEAD
+  git tag -f -a vX.Y.Z -m "Release X.Y.Z"
+  git push -f origin vX.Y.Z
+  ```
 
-It takes under a minute. `FERROCRYPT_LARGE_FILE_BYTES` overrides the payload
-size; a small value checks the harness quickly but does not cross the boundary,
-so the release check must run at the default size.
+  From then on, use only the run that this push started. An older run builds
+  the commit the tag named before, and its publishing stops because the tag
+  no longer names that commit.
+- Publishing failed because crates.io does not trust the workflow: check the
+  settings under "Once, before the first release from the workflow", then
+  re-run the failed jobs.
+- Publishing stopped because the tagged commit is not on `main`: nothing was
+  published. Delete the tag, here and on GitHub, and release from `main`:
 
-## Rollback Release
+  ```bash
+  git tag -d vX.Y.Z
+  git push origin --delete vX.Y.Z
+  ```
+- Publishing stopped after `ferrocrypt` and before `ferrocrypt-cli`: re-run the
+  failed jobs. The workflow skips a crate whose package on crates.io is exactly
+  the one this commit makes. If one at this version differs, it stops: yank
+  that version as below, and release the next one.
+- Publishing stopped because the packages differ from the ones the `package`
+  job built: this attempt published nothing. Re-run all the jobs of the run,
+  so that both jobs package the crates again with the same toolchain.
+- crates.io keeps refusing `ferrocrypt-cli` after it accepted `ferrocrypt`:
+  yank `ferrocrypt` as below, fix the cause, and release the next version.
+- The crates are on crates.io but the GitHub release failed: re-run the failed
+  jobs.
 
-If something goes wrong:
-
-```bash
-# Undo the last commit
-git reset --soft HEAD~1
-
-# Delete the tag locally
-git tag -d vX.Y.Z
-
-# Delete the tag remotely
-git push origin :refs/tags/vX.Y.Z
-```
+A version on crates.io cannot be replaced, and its number cannot be used
+again. If a published version is wrong, yank it, for example with
+`cargo yank --version X.Y.Z ferrocrypt`, and release the next version.
+`cargo yank` needs a crates.io API token on your machine: create one that may
+only yank, and revoke it afterwards.
 
 ## References
 
-- [cargo-release documentation](https://rust-lang.github.io/cargo-release/)
+- [cargo-release 1.1.6 reference](https://github.com/crate-ci/cargo-release/blob/1263ad90fa0edfd3d645bb287b40d7292fd0b381/docs/reference.md)
 - [Semantic Versioning](https://semver.org/)

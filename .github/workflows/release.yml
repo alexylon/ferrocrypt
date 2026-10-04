@@ -5,11 +5,16 @@ on:
     tags:
       - "v*"
 
+# A job that needs more than reading asks for it itself.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The crates the release publishes: every workspace crate that can be
+  # published, which the `version` job checks. The publish job builds nothing,
+  # so the `package` job builds every crate named here.
+  PUBLISHED_CRATES: ferrocrypt ferrocrypt-cli
 
 jobs:
   # Release gate: the full CI suite (workspace lib + CLI tests on three
@@ -30,27 +35,67 @@ jobs:
     with:
       max_total_time: 60
 
-  # Release gate: the desktop app is excluded from the workspace, so its version
-  # is not kept in lockstep by cargo-release's shared-version. Verify it matches
-  # the pushed tag and fail the release on drift, instead of silently shipping an
-  # app whose displayed version is stale.
-  desktop-version:
+  # Release gate: the tag must name the version of every crate the release
+  # publishes and of the desktop app it packages, and a published crate that
+  # depends on another must require that version of it. The desktop app is
+  # excluded from the workspace, so cargo-release's shared-version does not
+  # update it; a rule in ferrocrypt-lib/release.toml rewrites it, and this
+  # check fails the release on drift instead of shipping installers that carry
+  # an old version.
+  version:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Verify desktop version matches the release tag
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
+
+      - name: Check that the tag names every version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          manifest="$(grep -m1 '^version = ' ferrocrypt-desktop/Cargo.toml | sed -E 's/^version = "(.*)"$/\1/')"
-          if [ "$tag" != "$manifest" ]; then
-            echo "::error::ferrocrypt-desktop version ($manifest) does not match release tag ($tag). Bump ferrocrypt-desktop/Cargo.toml before tagging."
-            exit 1
+          status=0
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          if ! jq --exit-status --arg crates "$PUBLISHED_CRATES" '
+              ([.packages[] | select(.publish != []) | .name] | sort)
+              == ($crates | split(" ") | map(select(length > 0)) | sort)' <<< "$metadata" > /dev/null; then
+            echo "::error::PUBLISHED_CRATES does not name exactly the workspace crates that can be published."
+            status=1
           fi
-          echo "ferrocrypt-desktop version $manifest matches tag $tag."
+          for crate in $PUBLISHED_CRATES; do
+            version="$(jq --raw-output --arg crate "$crate" \
+              '.packages[] | select(.name == $crate) | .version' <<< "$metadata")"
+            if [ "$version" != "$tag" ]; then
+              echo "::error::$crate has version ${version:-none}, but the tag is $GITHUB_REF_NAME."
+              status=1
+            fi
+          done
+          # Each requirement of a published crate on another published crate.
+          requirements="$(jq --raw-output --arg crates "$PUBLISHED_CRATES" '
+            ($crates | split(" ")) as $published
+            | .packages[] | select(.name | IN($published[])) | .name as $crate
+            | .dependencies[] | select(.kind == null and (.name | IN($published[])))
+            | "\($crate) \(.name) \(.req)"' <<< "$metadata")"
+          while read -r crate dependency requirement; do
+            if [ -n "$crate" ] && [ "$requirement" != "^$tag" ]; then
+              echo "::error::$crate requires $dependency $requirement, but the tag is $GITHUB_REF_NAME."
+              status=1
+            fi
+          done <<< "$requirements"
+          desktop="$(cargo metadata --no-deps --format-version 1 --manifest-path ferrocrypt-desktop/Cargo.toml \
+            | jq --raw-output '.packages[] | select(.name == "ferrocrypt-desktop") | .version')"
+          if [ "$desktop" != "$tag" ]; then
+            echo "::error::ferrocrypt-desktop has version ${desktop:-none}, but the tag is $GITHUB_REF_NAME."
+            status=1
+          fi
+          exit "$status"
 
   # Release gate: the >4 GiB round-trip test is too slow and disk-hungry
-  # (minutes and ~8 GiB of scratch) for every push, so it runs only here,
-  # before a tag ships. It is the only test that moves more than u32::MAX
+  # (minutes and ~8 GiB of scratch) for every push, so every push skips it. A
+  # release runs it in scripts/release_hook.sh before the release commit, and
+  # here on the tagged commit, whoever made the tag; scripts/run_all_tests.sh
+  # runs it on request. It is the only test that moves more than u32::MAX
   # bytes through real I/O, so it is the only check that catches a u32/usize
   # truncation in the size or progress accounting above 4 GiB. Ubuntu-only:
   # hosted ubuntu runners have the disk headroom, and macOS/Windows runners
@@ -77,13 +122,54 @@ jobs:
       - name: Run the >4 GiB round-trip test
         run: cargo test --release -p ferrocrypt --test large_file -- --ignored --test-threads=1
 
+  # Release gate: cargo packages the library and the CLI as crates.io will
+  # receive them, and builds each package, the CLI against the packaged
+  # library. This is the build `cargo publish` would make. It runs here, in a
+  # job that cannot obtain a crates.io token, so that no dependency's code runs
+  # in the publish job.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      toolchain: ${{ steps.toolchain.outputs.version }}
+      checksums: ${{ steps.package.outputs.checksums }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
+
+      # The publish job packages the crates again with this exact toolchain
+      # and must make the very packages this job built, even if a new stable
+      # Rust is released in between.
+      - name: Record the toolchain version
+        id: toolchain
+        run: echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+
+      - name: Package and build the library and the CLI
+        id: package
+        run: |
+          packages=()
+          for crate in $PUBLISHED_CRATES; do
+            packages+=(--package "$crate")
+          done
+          cargo package --locked "${packages[@]}"
+          checksums="$(cd target/package && sha256sum -- *.crate)"
+          {
+            echo "checksums<<END_OF_CHECKSUMS"
+            echo "$checksums"
+            echo "END_OF_CHECKSUMS"
+          } >> "$GITHUB_OUTPUT"
+
   build:
-    needs: [verify, fuzz, desktop-version, large-file]
+    needs: [verify, fuzz, version, large-file, package]
     strategy:
       # One target's failure must not cancel the others: a tag build is
       # expensive to reach and every remaining artifact is evidence about
-      # what went wrong. Nothing incomplete can escape, because `release`
-      # requires the whole matrix to have succeeded.
+      # what went wrong. Nothing incomplete can escape, because `publish`,
+      # and `release` after it, require the whole matrix to have succeeded.
       fail-fast: false
       matrix:
         include:
@@ -277,11 +363,153 @@ jobs:
             ferrocrypt-cli-${{ matrix.target }}.*
             FerroCrypt-${{ matrix.target }}.*
 
-  release:
-    needs: build
+  # Runs only after every check and every build: a version reaches crates.io
+  # only when it has passed the whole suite and its CLI and desktop app are
+  # built for the GitHub release. Any code run in this job could obtain a
+  # crates.io token, so it builds nothing: the `package` job built every crate
+  # it publishes. cargo uploads the library first, as the CLI depends on it,
+  # and waits until crates.io lists it.
+  publish:
+    needs: [build, package]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # crates.io gives a token only to a job in this environment, which
+    # RELEASE.md limits to release tags.
+    environment: release
+    permissions:
+      contents: read
+      # Trades the run's identity for a short-lived crates.io token.
+      id-token: write
+    defaults:
+      run:
+        shell: bash
 
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The history of `main`, to check that the commit is on it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the toolchain the package job used
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: ${{ needs.package.outputs.toolchain }}
+
+      - name: Check that the tag still names this commit, and that it is on main
+        run: scripts/check_release_commit.sh "$GITHUB_REF_NAME" "$(git rev-parse HEAD)"
+
+      # Before the job signs in to crates.io: without building anything, cargo
+      # must make the very packages the `package` job built.
+      - name: Package the crates again and compare them
+        env:
+          BUILT: ${{ needs.package.outputs.checksums }}
+        run: |
+          packages=()
+          for crate in $PUBLISHED_CRATES; do
+            packages+=(--package "$crate")
+          done
+          cargo package --locked --no-verify "${packages[@]}"
+          if ! (cd target/package && sha256sum --check --strict <<< "$BUILT"); then
+            echo "::error::These packages differ from the ones the package job built."
+            exit 1
+          fi
+
+      # A crate already at this version is skipped when crates.io holds the
+      # very package made here, as after an earlier attempt to release this
+      # commit; any other package at this version stops the release.
+      - name: Find the crates still to publish
+        id: plan
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          agent='ferrocrypt release workflow (https://github.com/alexylon/ferrocrypt)'
+          missing=()
+          for crate in $PUBLISHED_CRATES; do
+            response="$RUNNER_TEMP/$crate-$version.json"
+            if ! status="$(curl --silent --show-error --retry 3 --retry-all-errors --output "$response" \
+                --write-out '%{http_code}' --user-agent "$agent" "https://crates.io/api/v1/crates/$crate/$version")"; then
+              echo "::error::crates.io could not be asked for $crate $version. Re-run this job in a few minutes."
+              exit 1
+            fi
+            case "$status" in
+              200)
+                published="$(jq --raw-output '.version.checksum' "$response")"
+                packaged="$(sha256sum "target/package/$crate-$version.crate" | cut -d ' ' -f 1)"
+                if [ "$published" != "$packaged" ]; then
+                  echo "::error::$crate $version is already on crates.io, and it is not the package this commit makes."
+                  exit 1
+                fi
+                echo "$crate $version is already on crates.io, as the package this commit makes."
+                ;;
+              404)
+                # crates.io trusts a workflow only for a crate it already has,
+                # so this job cannot publish a crate's first version.
+                if ! known="$(curl --silent --show-error --retry 3 --retry-all-errors --output /dev/null \
+                    --write-out '%{http_code}' --user-agent "$agent" "https://crates.io/api/v1/crates/$crate")"; then
+                  echo "::error::crates.io could not be asked for $crate. Re-run this job in a few minutes."
+                  exit 1
+                fi
+                case "$known" in
+                  200)
+                    ;;
+                  404)
+                    echo "::error::$crate is not on crates.io yet; publish its first version by hand, as RELEASE.md describes."
+                    exit 1
+                    ;;
+                  *)
+                    echo "::error::crates.io answered HTTP $known when asked for $crate."
+                    exit 1
+                    ;;
+                esac
+                missing+=("$crate")
+                ;;
+              *)
+                echo "::error::crates.io answered HTTP $status when asked for $crate $version."
+                exit 1
+                ;;
+            esac
+          done
+          echo "crates=${missing[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to crates.io
+        if: steps.plan.outputs.crates != ''
+        id: crates-io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish the crates still to publish
+        if: steps.plan.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
+          CRATES: ${{ steps.plan.outputs.crates }}
+        run: |
+          # Again, right before the upload, as the tag may have moved since.
+          scripts/check_release_commit.sh "$GITHUB_REF_NAME" "$(git rev-parse HEAD)"
+          packages=()
+          for crate in $CRATES; do
+            packages+=(--package "$crate")
+          done
+          cargo publish --locked --no-verify "${packages[@]}"
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # In a folder of its own, apart from the archives the release attaches.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: source
+          # The history of `main`, to check that the commit is on it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Again, as the tag may have moved since the publish job checked it.
+      - name: Check that the tag still names this commit, and that it is on main
+        working-directory: source
+        run: scripts/check_release_commit.sh "$GITHUB_REF_NAME" "$(git rev-parse HEAD)"
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           merge-multiple: true

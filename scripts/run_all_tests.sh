@@ -164,6 +164,8 @@ TESTVECTORS_DIRTY=$(git status --porcelain ferrocrypt-lib/testvectors | wc -l | 
 FIXTURES_DIRTY=$(git status --porcelain ferrocrypt-lib/tests/fixtures | wc -l | tr -d ' ')
 
 note "workspace"
+# The skip list matches the CI `build` job's in .github/workflows/rust.yml,
+# whose comment names every copy of it.
 cargo test -- --test-threads=1 --include-ignored \
     --skip regenerate_fixtures --skip regenerate_suite_vectors \
     --skip regenerate_wire_corpus \

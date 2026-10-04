@@ -1,30 +1,36 @@
-# Cargo-release configuration
-# Automates versioning, tagging, and publishing for both ferrocrypt and ferrocrypt-cli
-# Reference: https://rust-lang.github.io/cargo-release/
+# A release on this machine, in this order:
+# 1. cargo-release sets the new versions and updates Cargo.lock.
+# 2. It applies the replacements set in ferrocrypt-lib/release.toml: the
+#    CHANGELOG section, and the version in the desktop app and in the README.
+# 3. It runs the hook set in ferrocrypt-lib/release.toml.
+# 4. It makes one commit, tags it, and pushes both.
+# The tag starts .github/workflows/release.yml, which checks, builds, and
+# publishes.
+#
+# Reference for cargo-release 1.1.6:
+# https://github.com/crate-ci/cargo-release/blob/1263ad90fa0edfd3d645bb287b40d7292fd0b381/docs/reference.md
 
-# Both crates share the same version
+# The release workflow publishes only a commit on main.
+allow-branch = ["main"]
+
+# The library, the CLI, and the test-support crate share one version.
 shared-version = true
 
-# Pre-release commit message
+# One release commit, made after the tests, so they run on exactly what is
+# tagged and a failure leaves no commit behind.
+consolidate-commits = true
+
 pre-release-commit-message = "Release {{version}}"
 
-# Tag configuration
 tag-name = "v{{version}}"
 tag-message = "Release {{version}}"
 
-# Publish configuration
-publish = true
+# The release workflow publishes, once every check and build on the tagged
+# commit passes.
+publish = false
 
-# Automatically update dependency versions between workspace crates
+# The CLI's dependency on the library follows the new version.
 dependent-version = "upgrade"
 
-# Push configuration
 push = true
 push-remote = "origin"
-
-# Consolidate commits before release
-consolidate-commits = false
-
-# Run tests before release
-verify = true
-

@@ -250,6 +250,17 @@ In the release workflow, after the push:
   yank `ferrocrypt` as below, fix the cause, and release the next version.
 - The crates are on crates.io but the GitHub release failed: re-run the failed
   jobs.
+- After a release, the `vet` job fails with `ferrocrypt:X.Y.Z missing
+  ["safe-to-deploy"]`: no wildcard audit in `supply-chain/audits.toml` covers
+  the new version's publisher, which the job's output names. If it is
+  `github:alexylon/ferrocrypt`, the audits for the release workflow have
+  expired: renew them with `cargo vet renew ferrocrypt` and
+  `cargo vet renew ferrocrypt-cli`. If it is another publisher, such as a
+  renamed repository, certify that one with
+  `cargo vet certify <crate> --wildcard <publisher>`, and add `renew = false`
+  to the old publisher's entries so that they are never extended. Then run
+  `cargo vet`, which also records the new publisher, and commit
+  `supply-chain/`.
 
 A version on crates.io cannot be replaced, and its number cannot be used
 again. If a published version is wrong, yank it, for example with

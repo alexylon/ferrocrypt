@@ -38,21 +38,38 @@ const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 /// targets (ext4, XFS, APFS, NTFS).
 const FILESYSTEM_NAME_MAX_BYTES: usize = 255;
 
-/// Maximum UTF-8 byte length of a single FCA path component per
-/// FORMAT.md §9.6: the filesystem name limit minus room for the
-/// `.incomplete` staging suffix extraction appends to the root
-/// component (§9.11 step 10). Without the reserve, a near-limit root
-/// name would archive fine and then fail to extract because its
-/// working name exceeds what the filesystem can create.
+/// Maximum UTF-8 byte length of a single FCA path component, fixed by the
+/// FCA path grammar (FORMAT.md §9.6). It is a literal, not derived from the
+/// staging suffix, so a change to extraction cannot move it. The frozen
+/// corpus case `fca-path-component-over-max` refuses a 245-byte component.
+///
+/// The limit leaves exactly the room the `.incomplete` staging suffix needs
+/// (§9.11 step 10) within the filesystem name limit. Without that reserve, a
+/// near-limit root name would archive fine and then fail to extract because
+/// its working name exceeds what the filesystem can create. The assertion in
+/// the initializer fails the build when the suffix no longer fills that room
+/// exactly: a longer suffix would make such names impossible to extract, and
+/// a shorter one would leave the explanation in §9.6 wrong. Neither is a
+/// reason to change the limit.
 ///
 /// The over-long-component rejection reason embeds this number; it lives in
 /// `super::reasons`, and a unit test below pins the two together.
-pub const FCA_COMPONENT_MAX_BYTES: usize = FILESYSTEM_NAME_MAX_BYTES - INCOMPLETE_SUFFIX.len();
+pub const FCA_COMPONENT_MAX_BYTES: usize = {
+    const LIMIT: usize = 244;
+    // Checked here rather than in a separate `const _` item, which the
+    // minimum supported Rust version does not count as a use of
+    // `FILESYSTEM_NAME_MAX_BYTES`.
+    assert!(
+        LIMIT + INCOMPLETE_SUFFIX.len() == FILESYSTEM_NAME_MAX_BYTES,
+        "the staging suffix must exactly fill the room FORMAT.md §9.6 reserves beside the frozen component limit"
+    );
+    LIMIT
+};
 
 /// Validates an FCA archive path against the FORMAT.md §9.6 grammar.
-/// Same function called by encode-side metadata-pass and decode-side
-/// manifest-parse — the single shared implementation IS the writer /
-/// reader symmetry guarantee.
+/// The writer's metadata pass and the reader's manifest parser both call
+/// this one function, which is what keeps the two sides applying the same
+/// grammar.
 pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
         return Err(CryptoError::MalformedArchive {
@@ -913,18 +930,13 @@ mod tests {
     }
 
     /// The byte count embedded in the rejection text must equal the
-    /// constant, and the constant must leave exactly the suffix room
-    /// it promises. Locks the human-readable message and the derived
-    /// value together so neither can drift alone.
+    /// constant, so the message cannot state a limit other than the one the
+    /// grammar applies.
     #[test]
     fn component_cap_reason_matches_constant() {
         assert_eq!(
             COMPONENT_TOO_LONG,
             format!("component exceeds {FCA_COMPONENT_MAX_BYTES} bytes"),
-        );
-        assert_eq!(
-            FCA_COMPONENT_MAX_BYTES + INCOMPLETE_SUFFIX.len(),
-            FILESYSTEM_NAME_MAX_BYTES,
         );
     }
 

@@ -1258,6 +1258,8 @@ mod tests {
     use super::super::IncompleteOutputPolicy;
     use super::super::decode::unarchive;
     use super::super::model::make_entry;
+    #[cfg(unix)]
+    use super::super::path::FCA_COMPONENT_MAX_BYTES;
     use super::*;
     #[cfg(windows)]
     use crate::archive::platform::try_make_junction;
@@ -1987,19 +1989,18 @@ mod tests {
         ));
     }
 
-    /// Spec §9.6: a source name longer than the per-component byte cap
-    /// must reject during the metadata pass — without the cap, the
-    /// writer would emit an archive whose `.incomplete` working name
-    /// exceeds the 255-byte filesystem limit at extraction time.
-    /// Unix-only: a 250-byte filename near the Windows `MAX_PATH`
-    /// ceiling cannot be reliably created in a tempdir there.
+    /// Spec §9.6: a source name one byte over the per-component cap is
+    /// refused during the metadata pass, because the reader refuses such
+    /// a component and the writer must not emit an archive its own reader
+    /// rejects. Unix-only: a filename that long near the Windows
+    /// `MAX_PATH` ceiling cannot be reliably created in a tempdir there.
     #[cfg(unix)]
     #[test]
     fn rejects_over_long_component_in_source() {
         let src = tempfile::TempDir::new().unwrap();
         let dir = src.path().join("d");
         fs::create_dir(&dir).unwrap();
-        fs::write(dir.join("n".repeat(250)), b"x").unwrap();
+        fs::write(dir.join("n".repeat(FCA_COMPONENT_MAX_BYTES + 1)), b"x").unwrap();
 
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
@@ -2022,7 +2023,7 @@ mod tests {
     fn round_trip_component_at_byte_cap() {
         let src = tempfile::TempDir::new().unwrap();
         let out = tempfile::TempDir::new().unwrap();
-        let name = "n".repeat(244);
+        let name = "n".repeat(FCA_COMPONENT_MAX_BYTES);
         let src_file = src.path().join(&name);
         fs::write(&src_file, b"payload").unwrap();
 

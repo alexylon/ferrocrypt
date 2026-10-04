@@ -21,6 +21,12 @@ use crate::error::{sanitize_for_display, sanitize_path_for_display, sanitize_pre
 /// `.fcr` tempfile and by `archive::decode::unarchive` for the per-root
 /// rename-into-place pattern. `pub` (in a private module) so
 /// `fuzz_exports` can re-export it for the full-pipeline fuzz oracle.
+///
+/// It is also the suffix of the extraction working name
+/// `{root}.incomplete` that `FORMAT.md` §9.11 step 10 fixes, so its text
+/// must not change. The frozen §9.6 component limit reserves exactly its
+/// length, and `archive::path` fails the build when that length changes;
+/// a change of the text alone is not detected.
 pub const INCOMPLETE_SUFFIX: &str = ".incomplete";
 
 /// Conflict-message label for the encrypted-file or extracted output

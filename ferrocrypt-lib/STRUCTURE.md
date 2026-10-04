@@ -1128,9 +1128,9 @@ It contains:
 - pre-promotion file durability: `sync_file_durable` flushes a staged
   `std::fs::File` with `sync_all` and falls back to plain `fsync(2)`
   where the filesystem reports the full flush as unsupported
-  (`errno_not_supported`; macOS smbfs among them). Used where one flush
-  covers a whole operation: the encrypted output and each generated key
-  file. A single-file archive extraction similarly uses
+  (`errno_not_supported`; macOS smbfs does, on some servers). Used where
+  one flush covers a whole operation: the encrypted output and each
+  generated key file. A single-file archive extraction similarly uses
   `archive/platform.rs::sync_single_file_durable`. Directory extraction
   instead applies `sync_file_standard` (plain `fsync(2)` on Linux and
   macOS) to each staged file, then calls `sync_extraction_barrier` once
@@ -1139,9 +1139,14 @@ It contains:
   barriers from one per file to one per operation without relying on
   plain `fsync` for operating-system-crash durability; a filesystem that
   rejects the full flush falls back to standard `fsync`, matching the
-  strongest behavior it supported before. Linux already uses `fsync`
-  for `sync_all`, and Windows retains `FlushFileBuffers` per file.
-  Direct `rustix` `fsync` calls reach the syscall through
+  strongest behavior it supported before. The two fallback rules, for a
+  file and for a directory, the latter including a filesystem without
+  directory flushing, live in `fs/atomic.rs::flush_file_with_fallback`
+  and `flush_dir_with_fallback`. Every flush that falls back applies one
+  of them, and unit tests drive both with injected errors, as no
+  filesystem in CI produces every error they handle. Linux already uses
+  `fsync` for `sync_all`, and Windows retains `FlushFileBuffers` per
+  file. Direct `rustix` `fsync` calls reach the syscall through
   `fsync_uninterrupted`, the single source of truth for EINTR handling,
   because `rustix` reports a signal-interrupted call as `EINTR` while
   `File::sync_all` retries internally;

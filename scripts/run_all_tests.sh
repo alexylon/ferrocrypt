@@ -22,7 +22,7 @@
 #                                  FERROCRYPT_GAUNTLET_ROOT_LANES=1, uses sudo)
 #   8. smb                — macOS loopback SMB share (opt in with
 #                           FERROCRYPT_GAUNTLET_SMB=1; python3 + network
-#                           access for "pip install impacket")
+#                           access for "pip install impacket==0.13.1")
 #   9. msrv               — lib on 1.87.0, CLI on 1.89.0 (skipped unless
 #                           those toolchains are installed via rustup)
 #
@@ -320,12 +320,15 @@ else
 fi
 
 # ── 8. loopback SMB share (macOS, opt in) ────────────────────────────
+# Served by Impacket, pinned to 0.13.1, because it needs no system change.
+# Its SMB2 server sometimes returns corrupted bytes, so a failure here that
+# CI's macos-smb lane does not show on the same commit may come from it.
 if [ "$(uname)" = Darwin ] && [ "${FERROCRYPT_GAUNTLET_SMB:-0}" = 1 ]; then
     note "smb"
     SMB_DIR=$(mktemp -d)
     mkdir -p "$SMB_DIR/share" "$SMB_DIR/mnt"
     if python3 -m venv "$SMB_DIR/venv" &&
-        "$SMB_DIR/venv/bin/pip" install --quiet impacket; then
+        "$SMB_DIR/venv/bin/pip" install --quiet impacket==0.13.1; then
         "$SMB_DIR/venv/bin/smbserver.py" -smb2support -port 1445 \
             -username fcr -password fcrtest FCRSMB "$SMB_DIR/share" \
             >"$SMB_DIR/server.log" 2>&1 &

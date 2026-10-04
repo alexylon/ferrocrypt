@@ -520,44 +520,46 @@ jobs:
               Format-Volume -DriveLetter $part.DriveLetter -FileSystem exFAT -Confirm:$false | Out-Null
               "FERROCRYPT_FS_MATRIX_DIR=$($part.DriveLetter):\" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             mount_teardown: Dismount-VHD -Path C:\fsmatrix.vhd -ErrorAction SilentlyContinue
-          # macOS loopback SMB: the macOS SMB client has no
-          # renameatx_np(RENAME_EXCL), so encrypt finalization and
-          # decrypt promotion take the claim-then-rename fallback, and
-          # smbfs rejects F_FULLFSYNC and directory fsync, so the
-          # durability helpers take their documented downgrade
-          # branches. This is the "decrypt onto a NAS share from a
-          # Mac" scenario; no other lane reaches these paths. The
-          # share is served by the runner itself (impacket's Python
-          # SMB server, which needs no root) and mounted back over
+          # macOS loopback SMB, the "decrypt onto a NAS share from a Mac"
+          # scenario. The macOS SMB client has no
+          # renameatx_np(RENAME_EXCL) and the share has no hard links, so
+          # encrypt finalization and decrypt promotion take the
+          # claim-then-rename fallback. smbfs refuses F_FULLFSYNC on a
+          # directory, so directory flushes take their fallback to plain
+          # fsync, which no other lane reaches. A file's F_FULLFSYNC
+          # succeeds on this server, so the unit tests in fs/atomic.rs
+          # cover the file-flush fallback instead. The share is served
+          # by macOS's own SMB server on the runner and mounted back over
           # loopback, so no second machine is involved.
           #
-          # Impacket labels its SMB2 support experimental. Pin it so a
-          # release cannot silently change this lane; the test step below
-          # narrowly retries the two integrity errors its synthetic server
-          # has intermittently produced while the same revision passes on
-          # another run.
+          # macOS keeps an SMB hash only of a password set after SMB-NT
+          # is turned on for the user, so the lane creates its own user
+          # and sets its password again once SMB-NT is on. The server
+          # is loaded only when it is not loaded already, as loading a
+          # loaded service fails.
           - name: macos-smb
             os: macos-latest
             mount_setup: |
-              python3 -m venv /tmp/impacket-venv
-              /tmp/impacket-venv/bin/pip install --quiet impacket==0.13.1
-              mkdir -p /tmp/smb-share /tmp/smb-mnt
-              /tmp/impacket-venv/bin/smbserver.py -smb2support -port 1445 \
-                -username fcr -password fcrtest SHARE /tmp/smb-share \
-                > /tmp/smbserver.log 2>&1 &
-              echo $! > /tmp/smbserver.pid
-              # Mounting before the server listens fails with a
-              # connection refusal, so wait for the port first.
+              sudo sysadminctl -addUser fcrsmb -password fcrtest
+              sudo pwpolicy -u fcrsmb -sethashtypes SMB-NT on
+              sudo dscl . -passwd /Users/fcrsmb fcrtest
+              sudo mkdir -p /Users/Shared/fcr-smb
+              sudo chown fcrsmb:staff /Users/Shared/fcr-smb
+              sudo launchctl list com.apple.smbd > /dev/null 2>&1 \
+                || sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.smbd.plist
+              sudo launchctl start com.apple.smbd
+              sudo sharing -a /Users/Shared/fcr-smb -S FCRSHARE -s 001 -g 000 -n FCRSHARE
+              # launchd opens port 445 for smbd, normally as the load
+              # returns; mounting before that fails with a connection
+              # refusal, so wait for the port first.
               for _ in $(seq 1 30); do
-                nc -z 127.0.0.1 1445 && break
+                nc -z 127.0.0.1 445 && break
                 sleep 1
               done
-              mount_smbfs '//fcr:fcrtest@127.0.0.1:1445/SHARE' /tmp/smb-mnt \
-                || { cat /tmp/smbserver.log; exit 1; }
+              mkdir -p /tmp/smb-mnt
+              mount_smbfs '//fcrsmb:fcrtest@127.0.0.1/FCRSHARE' /tmp/smb-mnt
               echo "FERROCRYPT_FS_MATRIX_DIR=/tmp/smb-mnt" >> "$GITHUB_ENV"
-            mount_teardown: |
-              umount /tmp/smb-mnt || true
-              kill "$(cat /tmp/smbserver.pid)" || true
+            mount_teardown: umount /tmp/smb-mnt || true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -575,51 +577,18 @@ jobs:
         run: ${{ matrix.mount_setup }}
 
       - name: Run fs-matrix smoke tests
-        if: matrix.name != 'macos-smb'
         run: cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 
-      - name: Run fs-matrix smoke tests (macOS SMB)
-        if: matrix.name == 'macos-smb'
-        shell: bash
-        run: |
-          set -o pipefail
-          log="$(mktemp /tmp/fs-matrix-smb.XXXXXX)"
-          test_command=(
-            cargo test -p ferrocrypt --test archive_fs_matrix --
-            --ignored --test-threads=1 --nocapture
-          )
-
-          if "${test_command[@]}" 2>&1 | tee "$log"; then
-            exit 0
-          fi
-
-          # The loopback server's advertised SMB2 implementation is
-          # experimental. It has intermittently returned corrupted bytes
-          # from freshly committed .fcr or public-key files, including on
-          # revisions that passed this lane in a parallel run. Retry once
-          # only when every reported CryptoError is one of those observed
-          # data-integrity signatures. Assertions, filesystem errors, and
-          # every other CryptoError remain first-attempt failures.
-          # Under `--nocapture` the harness prints a failing test's error
-          # to stderr while its own progress line is still open, so the
-          # text follows `test <name> ... ` instead of starting a line.
-          # Read each report from `Error:` to the end of its line, require
-          # at least one, and require every one to be a known signature.
-          known_corruption='^Error: (PayloadTampered|InvalidFormat\(MalformedPublicKey\))$'
-          if grep -q "panicked at" "$log"; then
-            exit 1
-          fi
-          reported="$(grep -oE 'Error: .*$' "$log")" || exit 1
-          if printf '%s\n' "$reported" | grep -Evq "$known_corruption"; then
-            exit 1
-          fi
-
-          echo "::warning title=Retrying experimental SMB2 server corruption::The first macOS-SMB pass returned a known Impacket integrity signature; retrying the complete lane once."
-          "${test_command[@]}"
-
+      # The macOS SMB server writes no log file of its own.
       - name: Show SMB server diagnostics
         if: failure() && matrix.name == 'macos-smb'
-        run: cat /tmp/smbserver.log
+        run: |
+          sudo sharing -l || true
+          sudo launchctl list com.apple.smbd || true
+          sudo pwpolicy -u fcrsmb -gethashtypes || true
+          sudo log show --last 10m --style compact \
+            --predicate 'process == "smbd" OR process == "mount_smbfs" OR process == "NetAuthSysAgent" OR sender == "smbfs"' \
+            | tail -100 || true
 
       - name: Unmount target filesystem
         if: always()

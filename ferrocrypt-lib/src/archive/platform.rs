@@ -543,20 +543,13 @@ pub(crate) fn sync_extraction_barrier(dir: &Dir) -> io::Result<()> {
         Err(e) if crate::fs::atomic::dir_sync_unsupported(&e) => return Ok(()),
         Err(e) => return Err(e),
     };
-    match rustix::io::retry_on_intr(|| rustix::fs::fcntl_fullfsync(&sync_fd)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let e = io::Error::from(e);
-            if !crate::fs::atomic::dir_sync_unsupported(&e) {
-                return Err(e);
-            }
-            match crate::fs::atomic::fsync_uninterrupted(&sync_fd) {
-                Ok(()) => Ok(()),
-                Err(e) if crate::fs::atomic::dir_sync_unsupported(&e) => Ok(()),
-                Err(e) => Err(e),
-            }
-        }
-    }
+    crate::fs::atomic::flush_dir_with_fallback(
+        || {
+            rustix::io::retry_on_intr(|| rustix::fs::fcntl_fullfsync(&sync_fd))
+                .map_err(io::Error::from)
+        },
+        || crate::fs::atomic::fsync_uninterrupted(&sync_fd),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -955,13 +948,16 @@ pub(crate) fn sync_file_standard(file: &File) -> io::Result<()> {
 /// flush fall back to plain `fsync`, matching the encrypted-output and
 /// key-file durability policy.
 pub(crate) fn sync_single_file_durable(file: &File) -> io::Result<()> {
-    match file.sync_all() {
-        Ok(()) => Ok(()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Err(e) if crate::fs::atomic::errno_not_supported(&e) => {
-            crate::fs::atomic::fsync_uninterrupted(file)
-        }
-        Err(e) => Err(e),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::fs::atomic::flush_file_with_fallback(
+            || file.sync_all(),
+            || crate::fs::atomic::fsync_uninterrupted(file),
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        file.sync_all()
     }
 }
 

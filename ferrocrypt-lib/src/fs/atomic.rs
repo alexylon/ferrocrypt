@@ -786,9 +786,10 @@ pub(crate) fn fsync_uninterrupted<Fd: std::os::fd::AsFd>(fd: Fd) -> io::Result<(
 /// Flushes `file` to stable storage with the strongest primitive the
 /// filesystem supports. `File::sync_all` is the primary (on macOS it
 /// issues `F_FULLFSYNC`); a filesystem that reports the full flush as
-/// unsupported — macOS smbfs among them — falls back to plain
+/// unsupported (macOS smbfs does, on some servers) falls back to plain
 /// `fsync(2)`, which such filesystems do honor. Genuine sync failures
-/// surface unchanged; only the capability gap downgrades.
+/// surface unchanged; only the capability gap downgrades. On Linux and
+/// macOS, `flush_file_with_fallback` holds that rule.
 ///
 /// Directory extraction deliberately does not use this helper per file:
 /// it applies `archive::platform::sync_file_standard` to each staged
@@ -796,11 +797,13 @@ pub(crate) fn fsync_uninterrupted<Fd: std::os::fd::AsFd>(fd: Fd) -> io::Result<(
 /// `sync_extraction_barrier`. Single-file extraction keeps the strongest
 /// flush through `archive::platform::sync_single_file_durable`.
 pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
-    match file.sync_all() {
-        Ok(()) => Ok(()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Err(e) if errno_not_supported(&e) => fsync_uninterrupted(file),
-        Err(e) => Err(e),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        flush_file_with_fallback(|| file.sync_all(), || fsync_uninterrupted(file))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        file.sync_all()
     }
 }
 
@@ -843,16 +846,62 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
 /// flushing has a wider set of unsupported errors than file flushing.
 #[cfg(unix)]
 fn flush_dir_handle(handle: &std::fs::File) -> io::Result<()> {
-    match handle.sync_all() {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        flush_dir_with_fallback(|| handle.sync_all(), || fsync_uninterrupted(handle))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        match handle.sync_all() {
+            Ok(()) => Ok(()),
+            Err(e) if dir_sync_unsupported(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// The file-flush fallback rule: runs `full`, the strongest flush, and runs
+/// `plain` instead when `full` reports the operation as unsupported
+/// ([`errno_not_supported`]), returning what `plain` returns. Any other
+/// failure of `full` is returned without attempting `plain`.
+///
+/// [`sync_file_durable`] and `archive::platform::sync_single_file_durable`
+/// both apply this rule. The two flushes are passed in so that tests can
+/// drive every branch with injected errors.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn flush_file_with_fallback(
+    full: impl FnOnce() -> io::Result<()>,
+    plain: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match full() {
         Ok(()) => Ok(()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Err(e) if dir_sync_unsupported(&e) => match fsync_uninterrupted(handle) {
+        Err(e) if errno_not_supported(&e) => plain(),
+        Err(e) => Err(e),
+    }
+}
+
+/// The directory-flush fallback rule: runs `full`, and runs `plain` when
+/// `full` reports directory flushing as unsupported
+/// ([`dir_sync_unsupported`]). If `plain` is unsupported as well, the
+/// filesystem provides no directory flushing at all, which counts as
+/// success because no stronger operation exists there. A genuine failure
+/// of either flush is returned.
+///
+/// `flush_dir_handle` and `archive::platform::sync_extraction_barrier` both
+/// apply this rule. As for [`flush_file_with_fallback`], the two flushes are
+/// passed in so that tests can drive every branch with injected errors.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn flush_dir_with_fallback(
+    full: impl FnOnce() -> io::Result<()>,
+    plain: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match full() {
+        Ok(()) => Ok(()),
+        Err(e) if dir_sync_unsupported(&e) => match plain() {
             Ok(()) => Ok(()),
             Err(again) if dir_sync_unsupported(&again) => Ok(()),
             Err(again) => Err(again),
         },
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        Err(e) if dir_sync_unsupported(&e) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -2492,6 +2541,97 @@ mod tests {
                 "errno {genuine} must propagate as a genuine failure"
             );
         }
+    }
+
+    /// One case for a flush-fallback rule: the errno the full flush fails
+    /// with, the errno the plain flush fails with, the errno the rule must
+    /// return (`None` meaning success in each place), and whether the plain
+    /// flush must run.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    type FallbackCase = (Option<i32>, Option<i32>, Option<i32>, bool);
+
+    /// A flush that the fallback tests inject.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    type InjectedFlush<'a> = &'a dyn Fn() -> io::Result<()>;
+
+    /// Runs `rule` on every case with injected flushes, and checks its result
+    /// and whether it ran the plain flush.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn check_flush_fallback(
+        rule: impl Fn(InjectedFlush<'_>, InjectedFlush<'_>) -> io::Result<()>,
+        cases: &[FallbackCase],
+    ) {
+        let outcome = |errno: Option<i32>| {
+            errno.map_or(Ok(()), |code| Err(io::Error::from_raw_os_error(code)))
+        };
+        for &(full, plain, expected, plain_runs) in cases {
+            let ran = std::cell::Cell::new(false);
+            let result = rule(&|| outcome(full), &|| {
+                ran.set(true);
+                outcome(plain)
+            });
+            let case = format!("full flush {full:?}, plain flush {plain:?}");
+            let expected = expected.map_or(Ok(()), |code| Err(Some(code)));
+            assert_eq!(result.map_err(|e| e.raw_os_error()), expected, "{case}");
+            assert_eq!(ran.get(), plain_runs, "{case}");
+        }
+    }
+
+    /// The file-flush rule runs the plain flush only when the full flush
+    /// reports the operation as unsupported, and then returns the plain
+    /// flush's own result. Any other failure of the full flush is returned
+    /// without running the plain flush.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn file_flush_falls_back_only_when_the_full_flush_is_unsupported() {
+        check_flush_fallback(
+            |full, plain| flush_file_with_fallback(full, plain),
+            &[
+                (None, None, None, false),
+                (Some(libc::ENOTSUP), None, None, true),
+                (Some(libc::EOPNOTSUPP), None, None, true),
+                (Some(libc::ENOTSUP), Some(libc::EIO), Some(libc::EIO), true),
+                (
+                    Some(libc::ENOTSUP),
+                    Some(libc::ENOTSUP),
+                    Some(libc::ENOTSUP),
+                    true,
+                ),
+                (Some(libc::EIO), None, Some(libc::EIO), false),
+                (Some(libc::EINVAL), None, Some(libc::EINVAL), false),
+                (Some(libc::EACCES), None, Some(libc::EACCES), false),
+            ],
+        );
+    }
+
+    /// The directory-flush rule runs the plain flush when the full flush
+    /// reports directory flushing as unsupported. Where the plain flush is
+    /// unsupported too, the filesystem has no directory flushing, which counts
+    /// as success. Every genuine failure of either flush is returned.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn dir_flush_falls_back_and_accepts_a_filesystem_without_directory_flushing() {
+        check_flush_fallback(
+            |full, plain| flush_dir_with_fallback(full, plain),
+            &[
+                (None, None, None, false),
+                (Some(libc::ENOTSUP), None, None, true),
+                (Some(libc::EOPNOTSUPP), None, None, true),
+                (Some(libc::EINVAL), None, None, true),
+                (Some(libc::EBADF), None, None, true),
+                (Some(libc::ENOTSUP), Some(libc::ENOTSUP), None, true),
+                (Some(libc::ENOTSUP), Some(libc::EINVAL), None, true),
+                (Some(libc::ENOTSUP), Some(libc::EIO), Some(libc::EIO), true),
+                (
+                    Some(libc::ENOTSUP),
+                    Some(libc::EACCES),
+                    Some(libc::EACCES),
+                    true,
+                ),
+                (Some(libc::EIO), None, Some(libc::EIO), false),
+                (Some(libc::EACCES), None, Some(libc::EACCES), false),
+            ],
+        );
     }
 
     /// Windows counterpart to the Unix error-classification test.

@@ -4,7 +4,6 @@ dest*
 .DS_Store
 .sofos/
 .claude/
-.notes/
 __pycache__/
 
 # Test scratch workspaces created at runtime and removed by each test

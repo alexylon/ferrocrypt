@@ -57,9 +57,9 @@ Notes:
 - The static Linux CLI targets cannot be built on macOS: they need a Linux-targeting linker. `./scripts/build_static_cli.sh` builds one in a container, checks that it names no dynamic loader and needs no shared library, and smoke-tests it on Alpine — the same checks `release.yml` applies before a tag ships the binaries. CI runs the workspace suite against both musl targets on every push (`rust.yml`'s `musl` job), so a release never ships a binary the suite has not run on.
 - Run the Windows cross-check on its own. A `ferrocrypt-desktop` cargo command running at the same time makes it fail with `unresolved import ferrocrypt_test_support` in `ferrocrypt`'s own test targets, which looks like a real defect but disappears when the command runs alone. Concurrent workspace commands are fine.
 
-## `.notes/` directory
+## `.memo/` directory
 
-Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `.notes/` ships with the repo. Never reference `.notes/` or its files from committable content (code, comments, docs, scripts): the directory does not exist in a clone, so such references are dead links — state the needed conclusion inline instead.
+Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `.memo/` ships with the repo. Never reference `.memo/` or its files from committable content (code, comments, docs, scripts): the directory does not exist in a clone, so such references are dead links — state the needed conclusion inline instead.
 
 ## Architecture
 

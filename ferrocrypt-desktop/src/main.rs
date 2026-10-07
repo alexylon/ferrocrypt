@@ -288,6 +288,8 @@ fn main() {
     // crate's own, so the displayed version can't silently drift from a release.
     app.set_app_version(ferrocrypt::VERSION.into());
     app.set_combined_picker(cfg!(target_os = "macos"));
+    // Slint fills the X11 or Wayland selection clipboard only on these targets.
+    app.set_selection_clipboard(cfg!(all(unix, not(target_vendor = "apple"))));
 
     let selected_public_key: SelectedPublicKey = Arc::new(Mutex::new(None));
 
@@ -954,7 +956,15 @@ fn snap_back_mode(mode: i32) -> i32 {
 mod tests {
     use super::*;
     use ferrocrypt_test_support::{fast_kdf_params, fs_matrix_tempdir};
+    use i_slint_backend_testing::ElementHandle;
+    use slint::platform::software_renderer::MinimalSoftwareWindow;
+    use slint::platform::{
+        Clipboard, Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
+    };
+    use std::cell::{Cell, RefCell};
     use std::fs;
+    use std::rc::Rc;
+    use std::time::Duration;
 
     /// Drives `run_operation` through all five modes plus the two cross-mode
     /// rejections, so the mode routing and its tab-specific messages are
@@ -1705,5 +1715,160 @@ mod tests {
         assert!(priv_p.ends_with(PRIVATE_KEY_FILENAME));
         assert_eq!(pub_p.parent(), Some(Path::new("/tmp/keys")));
         assert_eq!(priv_p.parent(), Some(Path::new("/tmp/keys")));
+    }
+
+    /// A headless platform that records clipboard writes instead of passing
+    /// them to the system. Its clock moves only when the test advances it,
+    /// so double clicks happen only where the test intends them.
+    struct ClipboardRecorder {
+        window: Rc<MinimalSoftwareWindow>,
+        clock: Rc<Cell<Duration>>,
+        copied: Rc<RefCell<Vec<(Clipboard, String)>>>,
+    }
+
+    impl Platform for ClipboardRecorder {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+
+        fn duration_since_start(&self) -> Duration {
+            self.clock.get()
+        }
+
+        fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+            self.copied.borrow_mut().push((clipboard, text.to_string()));
+        }
+    }
+
+    /// A masked passphrase never leaves its field: neither copy and cut nor
+    /// a mouse selection, which fills the selection clipboard on X11 and
+    /// Wayland, hands it out. Each blocked case is paired with an unmasked
+    /// or unguarded one that does copy the text, so the test cannot pass
+    /// just because its input missed the fields.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which only builds with debug assertions include"
+    )]
+    fn masked_passphrase_fields_keep_their_text_in_the_window() {
+        const PASSPHRASE: &str = "hunter2";
+        const PASSWORD: &str = "AppWindow::pwd-ti";
+        const CONFIRM: &str = "AppWindow::rpwd-ti";
+
+        let window = MinimalSoftwareWindow::new(Default::default());
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        let copied = Rc::new(RefCell::new(Vec::new()));
+        slint::platform::set_platform(Box::new(ClipboardRecorder {
+            window,
+            clock: clock.clone(),
+            copied: copied.clone(),
+        }))
+        .expect("no other test sets a platform on this thread");
+
+        let app = AppWindow::new().unwrap();
+        app.show().unwrap();
+        app.set_password(PASSPHRASE.into());
+        app.set_password_repeated(PASSPHRASE.into());
+        let w = app.window();
+
+        let element = |id: &str| {
+            ElementHandle::find_by_element_id(&app, id)
+                .next()
+                .unwrap_or_else(|| panic!("no element {id}"))
+        };
+        // Starts a new click sequence, so `times` alone decides between a
+        // single and a double click.
+        let click = |id: &str, times: usize| {
+            clock.set(clock.get() + Duration::from_secs(1));
+            let field = element(id);
+            let (origin, size) = (field.absolute_position(), field.size());
+            let position = slint::LogicalPosition::new(
+                origin.x + size.width / 2.0,
+                origin.y + size.height / 2.0,
+            );
+            let button = PointerEventButton::Left;
+            for _ in 0..times {
+                w.dispatch_event(WindowEvent::PointerPressed { position, button });
+                w.dispatch_event(WindowEvent::PointerReleased { position, button });
+            }
+        };
+        let tap = |key: slint::SharedString| {
+            w.dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+            w.dispatch_event(WindowEvent::KeyReleased { text: key });
+        };
+        // Slint reports Cmd on macOS as Ctrl, so this covers both.
+        let shortcuts = |keys: &[&str]| {
+            let control: slint::SharedString = Key::Control.into();
+            w.dispatch_event(WindowEvent::KeyPressed {
+                text: control.clone(),
+            });
+            for key in keys {
+                tap((*key).into());
+            }
+            w.dispatch_event(WindowEvent::KeyReleased { text: control });
+        };
+        let take_copied = || copied.borrow_mut().drain(..).collect::<Vec<_>>();
+        let nothing: Vec<(Clipboard, String)> = Vec::new();
+
+        // Copy and cut do nothing in a masked field and work once it is shown.
+        app.set_selection_clipboard(false);
+        click(PASSWORD, 1);
+        shortcuts(&["a", "c", "x"]);
+        assert_eq!(take_copied(), nothing, "masked password copied");
+        assert_eq!(app.get_password(), PASSPHRASE, "masked password cut");
+        app.set_hide_password(false);
+        shortcuts(&["a", "c"]);
+        assert_eq!(
+            take_copied(),
+            [(Clipboard::DefaultClipboard, PASSPHRASE.to_string())],
+            "a shown password must stay copyable"
+        );
+        app.set_hide_password(true);
+
+        click(CONFIRM, 1);
+        shortcuts(&["a", "c", "x"]);
+        assert_eq!(take_copied(), nothing, "confirmation copied");
+        assert_eq!(app.get_password_repeated(), PASSPHRASE, "confirmation cut");
+
+        // A double click selects the masked text and copies it to the
+        // selection clipboard, unless the field is guarded.
+        click(PASSWORD, 2);
+        assert_eq!(
+            take_copied(),
+            [(Clipboard::SelectionClipboard, PASSPHRASE.to_string())],
+            "an unguarded double click must reach the field"
+        );
+        app.set_selection_clipboard(true);
+        click(PASSWORD, 2);
+        click(CONFIRM, 2);
+        assert_eq!(take_copied(), nothing, "a selection left a guarded field");
+
+        // A guarded click must move the focus here from the other field and
+        // clear the selection, so a key typed after select-all adds to the
+        // hidden text instead of replacing it.
+        app.set_selection_clipboard(false);
+        click(CONFIRM, 1);
+        app.set_selection_clipboard(true);
+        click(PASSWORD, 1);
+        shortcuts(&["a"]);
+        click(PASSWORD, 1);
+        tap("!".into());
+        assert_eq!(
+            app.get_password(),
+            format!("{PASSPHRASE}!"),
+            "a guarded click must focus the password and drop its selection"
+        );
+        assert_eq!(app.get_password_repeated(), PASSPHRASE);
+
+        // Tab must reach the next field: the wrapper around each input never
+        // takes focus.
+        let password = app.get_password();
+        tap(Key::Tab.into());
+        tap("?".into());
+        assert!(
+            app.get_password_repeated().ends_with('?'),
+            "Tab did not reach the confirmation"
+        );
+        assert_eq!(app.get_password(), password);
     }
 }

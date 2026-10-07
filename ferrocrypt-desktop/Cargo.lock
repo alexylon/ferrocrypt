@@ -1454,6 +1454,7 @@ dependencies = [
  "arboard",
  "ferrocrypt",
  "ferrocrypt-test-support",
+ "i-slint-backend-testing",
  "regex-lite",
  "rfd",
  "slint",

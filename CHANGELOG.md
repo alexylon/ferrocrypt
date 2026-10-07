@@ -9,6 +9,7 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Fixed
 - **Decrypting a folder on macOS no longer reports success when its final flush to disk could not run.** Some of the reasons it could not run were taken to mean that the filesystem cannot flush folders at all, so the decrypt reported success although a power loss soon after could still lose the decrypted files. Such a failure now stops the decrypt before the folder gets its final name. Only a filesystem that reports the operation as unsupported is still treated as unable to flush folders. Key generation on Unix systems other than Linux and macOS follows the same rule for its folder flush.
+- **The desktop app no longer lets a hidden passphrase leave its field.** While a passphrase was shown as dots, Ctrl+C and Ctrl+X (Cmd on macOS) still copied it to the clipboard, and on Linux and the BSDs selecting it with the mouse put it in the selection that a middle click pastes. A hidden passphrase now stays in its field: copy and cut do nothing, and on Linux and the BSDs a click in the field gives it focus and clears any selection, but no longer moves the cursor, selects text, or pastes with the middle button. A passphrase shown with the eye button behaves like any other text. Desktop only; no library behavior changed.
 
 ## [0.3.0-rc.5] - 2026-10-04
 

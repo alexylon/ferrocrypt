@@ -3,7 +3,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 fn main() {
-    slint_build::compile("ui/app.slint").unwrap();
+    // Slint debug info lets the tests find window elements by id; release
+    // builds leave it out. This variable follows the app's debug assertions,
+    // where `cfg!(debug_assertions)` would follow the build script's own.
+    let debug_info = std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some();
+    slint_build::compile_with_config(
+        "ui/app.slint",
+        slint_build::CompilerConfiguration::new().with_debug_info(debug_info),
+    )
+    .unwrap();
 
     println!("cargo:rerun-if-changed=passwords.txt");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");

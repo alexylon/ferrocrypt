@@ -8,9 +8,16 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
+# TODO: once Slint 1.19 is released, make a file or folder dropped onto the
+# window the input path, as if picked in the dialog: a `DropArea` in
+# `ui/app.slint` that passes the path to `apply_input_path` in `src/main.rs`.
+# Slint 1.18 cannot receive such drops.
+#
 # 1.18.1 or newer: older versions change the window's size when it moves to a
-# display with a different scale (seen on Wayland).
-slint = "1.18.1"
+# display with a different scale (seen on Wayland). Pinned exactly because
+# `i-slint-backend-testing` must match it: update `slint`, `slint-build`, and
+# `i-slint-backend-testing` together.
+slint = "=1.18.1"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 regex-lite = "0.1"
@@ -20,10 +27,13 @@ arboard = "3"
 # not pay the 1 GiB production KDF. Not published (this crate is publish = false).
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
+# Finds window elements in the passphrase-field test. It does not follow
+# semver, so it must match `slint` exactly.
+i-slint-backend-testing = "=1.18.1"
 
 [build-dependencies]
 # Keep in step with `slint`.
-slint-build = "1.18.1"
+slint-build = "=1.18.1"
 
 # cargo-wix is used for the Windows MSI build (cargo-bundle's MSI support is
 # still experimental). Suppress the EULA dialog (license-screen) for the

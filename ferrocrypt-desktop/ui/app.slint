@@ -139,6 +139,79 @@ component SmallButton inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
+// Reusable: password input
+// ---------------------------------------------------------------------------
+// Masked text never leaves this input: copy and cut do nothing, and where a
+// mouse selection would reach the selection clipboard, a click on masked text
+// only focuses the input.
+component PasswordInput {
+    in-out property <string> text;
+    in property <bool> masked: true;
+    in property <bool> enabled: true;
+    in property <bool> selection-clipboard: false;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted();
+    callback edited();
+    forward-focus: input;
+
+    // `TextInput` copies and cuts on these keys even when its text is
+    // masked. Cmd on macOS reaches Slint as Ctrl.
+    pure function is-copy-or-cut(event: KeyEvent) -> bool {
+        event.modifiers.control && (event.text.to-lowercase() == "c" || event.text.to-lowercase() == "x")
+    }
+
+    // Never takes focus itself, but sees the input's keys first.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if (root.masked && root.is-copy-or-cut(event)) {
+                return accept;
+            }
+            reject
+        }
+
+        input := TextInput {
+            // One line high: at full height, the offset would push the input,
+            // and its click area, below the field.
+            y: (parent.height - self.preferred-height) / 2;
+            height: self.preferred-height;
+            color: Theme.text;
+            font-size: Theme.font-body;
+            text-cursor-width: 2px;
+            selection-background-color: Theme.accent;
+            input-type: root.masked ? InputType.password : InputType.text;
+            text <=> root.text;
+            single-line: true;
+            enabled: root.enabled;
+            accepted => {
+                root.accepted();
+            }
+            edited => {
+                root.edited();
+            }
+        }
+
+        // `TextInput` copies a mouse selection to the selection clipboard
+        // when the button is released, so this click only focuses the input.
+        // It also clears the selection, as a normal click does, so the next
+        // key cannot replace hidden text.
+        guard := TouchArea {
+            x: input.x;
+            y: input.y;
+            width: input.width;
+            height: input.height;
+            enabled: root.selection-clipboard && root.masked && root.enabled;
+            mouse-cursor: MouseCursor.text;
+            clicked => {
+                input.focus();
+                input.clear-selection();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main application window
 // ---------------------------------------------------------------------------
 export component AppWindow inherits Window {
@@ -166,6 +239,9 @@ export component AppWindow inherits Window {
     in-out property <bool> hide-password: true;
     in-out property <bool> is-working: false;
     in-out property <bool> combined-picker: false;
+    // True where a mouse selection is copied to the selection clipboard
+    // (X11 and Wayland).
+    in property <bool> selection-clipboard: false;
     in-out property <string> conflict-warning;
     in-out property <int> password-strength: 0;
     in-out property <string> key-fingerprint;
@@ -810,18 +886,14 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    pwd-ti := TextInput {
+                    pwd-ti := PasswordInput {
                         x: Theme.field-pad;
                         width: parent.width - 40px;
-                        y: (parent.height - self.preferred-height) / 2;
-                        color: Theme.text;
-                        font-size: Theme.font-body;
-                        text-cursor-width: 2px;
-                        selection-background-color: Theme.accent;
-                        input-type: hide-password ? InputType.password : InputType.text;
+                        height: parent.height;
                         text <=> root.password;
-                        single-line: true;
+                        masked: hide-password;
                         enabled: !is-working;
+                        selection-clipboard: root.selection-clipboard;
                         accepted => {
                             if (!root.disable-start) {
                                 root.start-operation();
@@ -976,18 +1048,13 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    rpwd-ti := TextInput {
+                    rpwd-ti := PasswordInput {
                         x: Theme.field-pad;
                         width: parent.width - 36px;
-                        y: (parent.height - self.preferred-height) / 2;
-                        color: Theme.text;
-                        font-size: Theme.font-body;
-                        text-cursor-width: 2px;
-                        selection-background-color: Theme.accent;
-                        input-type: InputType.password;
+                        height: parent.height;
                         text <=> root.password-repeated;
-                        single-line: true;
                         enabled: parent.field-enabled;
+                        selection-clipboard: root.selection-clipboard;
                         accepted => {
                             if (!root.disable-start) {
                                 root.start-operation();

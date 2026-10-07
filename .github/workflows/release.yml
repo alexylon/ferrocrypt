@@ -211,6 +211,8 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # libssl-dev is for building cargo-bundle below, which links OpenSSL;
+      # the desktop app itself does not.
       - name: Install Linux dependencies
         if: runner.os == 'Linux' && !matrix.cli_only
         run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev

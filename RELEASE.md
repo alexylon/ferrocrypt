@@ -145,9 +145,8 @@ version, cargo-semver-checks counts a change of the second number, such as
 - No confirmed release blocker remains under
   [`THREAT_MODEL.md` section 6](THREAT_MODEL.md#6-release-and-review-governance)
 - About 8 GiB of free disk for the >4 GiB round trip
-- For a release without a pre-release suffix: `README.md` no longer describes
-  a pre-release, in its status note and beside its install commands. The
-  release changes only the version numbers.
+- For a release without a pre-release suffix: nothing in `README.md` describes
+  a pre-release. The release changes only the version numbers.
 - For a pre-release: the rule for `README.md` in `ferrocrypt-lib/release.toml`
   sets `prerelease = true` only if the README describes a changed API or CLI,
   such as for `0.4.0-rc.1`. Without it, the README's install commands keep

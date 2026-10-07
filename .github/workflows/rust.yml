@@ -378,8 +378,7 @@ jobs:
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
-            libwayland-dev \
-            libssl-dev
+            libwayland-dev
 
       - name: Clippy ferrocrypt-desktop
         working-directory: ferrocrypt-desktop

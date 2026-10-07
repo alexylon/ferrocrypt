@@ -102,7 +102,7 @@ Install from crates.io:
 
 ```bash
 # The release this README describes
-cargo install ferrocrypt-cli --version 0.3.0-rc.5
+cargo install ferrocrypt-cli@0.3.0-rc.5
 ```
 
 Or build from source:

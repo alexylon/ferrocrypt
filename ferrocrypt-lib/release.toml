@@ -44,6 +44,6 @@ prerelease = true
 # `exactly` is updated with it.
 [[pre-release-replacements]]
 file = "../README.md"
-search = '(crates\.io/crates/ferrocrypt(?:-cli)?/|docs\.rs/ferrocrypt/|cargo add ferrocrypt@|cargo install ferrocrypt-cli --version )[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
+search = '(crates\.io/crates/ferrocrypt(?:-cli)?/|docs\.rs/ferrocrypt/|cargo add ferrocrypt@|cargo install ferrocrypt-cli@)[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
 replace = '${1}{{version}}'
 exactly = 5

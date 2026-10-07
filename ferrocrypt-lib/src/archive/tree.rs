@@ -5,10 +5,10 @@
 //!
 //! Each entry's `path_utf8` must already have passed
 //! [`super::path::validate_fca_path`]; this module does not re-run the
-//! path grammar. It checks the COLLECTIVE tree-shape invariants — single
+//! path grammar. It checks the combined tree-shape invariants — single
 //! top-level root, root file vs root directory shape, every non-root
-//! entry's parent present, no child under a file path, no exact-
-//! duplicate or ASCII-case-insensitive-duplicate paths.
+//! entry's parent present, no child under a file path, and no duplicate paths
+//! under exact, ASCII-case-insensitive, or Unicode-normalized comparison.
 //!
 //! The validator is order-independent: HashMap-based parent lookup
 //! means a manifest with children listed before parents validates the

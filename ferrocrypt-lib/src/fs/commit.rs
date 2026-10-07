@@ -38,7 +38,7 @@
 //! by a removal by name would reach an entry substituted in between.
 //! No content from this run's staged entry reached that name, so nothing
 //! this run wrote is lost by leaving it. The caller is told through
-//! [`CommitFailure::claim_left`] that the name may still be occupied and
+//! `CommitFailure::claim_left` that the name may still be occupied and
 //! block the next attempt; the report does not state whose the remaining
 //! entry is or whether it contains anything.
 //!

@@ -24,72 +24,38 @@ pub(crate) use encode::{PreparedArchive, prepare_archive, validate_encrypt_input
 #[cfg(unix)]
 pub(crate) use format::PERMISSION_BITS_MASK;
 
-/// Policy for the `.incomplete` working tree when decrypt fails.
+/// Cleanup policy for staged plaintext after a returned decryption error.
 ///
-/// During decryption the archive is staged under
-/// `{output_dir}/{root_name}.incomplete` and atomically renamed to
-/// `{output_dir}/{root_name}` only after every authentication and
-/// validation check has passed. This policy controls what happens to
-/// the staged tree when a decrypt error occurs *before* that rename:
-/// payload AEAD failure on a later chunk, archive structural reject
-/// (manifest tree-shape failure, path-grammar reject, duplicate
-/// detection), trailing-bytes reject, or a final-name collision
-/// discovered at promotion time.
+/// Decryption stages a file or directory at
+/// `{output_dir}/{root_name}.incomplete`. After payload authentication and
+/// archive validation complete, it promotes that entry to
+/// `{output_dir}/{root_name}` using the platform's no-clobber commit route.
+/// Root permission and identity checks follow promotion. A pre-existing final
+/// or `.incomplete` entry is rejected, not reused or removed.
 ///
-/// [`Self::DeleteOnError`] is the default. Before commit, it avoids leaving
-/// authenticated-but-incomplete plaintext that an unaware caller could pick
-/// up. The post-commit exceptions are described below.
+/// [`Self::DeleteOnError`] is the default; [`Self::RetainOnError`] preserves
+/// partial output for inspection or recovery. A failed or unconfirmed cleanup
+/// is reported in the returned error with the working path.
 ///
-/// Three reports can occur *after* the output became visible at the final
-/// name. The staged record leaves the cleanup slot as soon as the run
-/// establishes that the entry there is its own — at the root-mode step where
-/// the identity confirms it, otherwise at the final-name check that follows —
-/// so this policy never removes a committed output:
+/// Once the output is confirmed as committed, later errors preserve it.
+/// These include a replaced final name, a changed or unconfirmable destination
+/// directory, a retained staging link, or a committed file with a link count
+/// other than one. The error describes the complete output or replacement;
+/// it must not be treated as evidence that nothing was written. Identity
+/// comparisons are skipped where the filesystem provides no usable identity;
+/// destination-directory confirmation also skips descriptor or memory exhaustion.
 ///
-/// - The final name no longer denotes the entry the run staged. The
-///   decrypt returns `Err` and FerroCrypt does not remove the committed
-///   object. If another writer moved it, it remains under that writer's chosen
-///   name; an entry placed at the final name is also left alone. The check runs
-///   on every supported platform, and is skipped only where the filesystem
-///   supplies no identity to compare.
-/// - The destination directory path no longer denotes the directory used for
-///   the commit. The decrypt returns `Err` and does not remove the confirmed
-///   output by name. If the directory was renamed, the complete plaintext is
-///   under that new name. This check runs on the same terms. A check that
-///   cannot run for a reason other than running out of open files or memory
-///   also returns `Err`, and the error says that the output is complete.
-/// - A committed file root carries more than one name. The count is read
-///   through the retained handle for every file root, on every supported
-///   platform and whatever route committed the name: a local writer can link
-///   the staged plaintext before the commit, and that link survives it. A
-///   hard-link fallback can also leave its staging name behind, or have its
-///   removal reach the wrong entry. The decrypt returns `Err`, preserves the
-///   complete commit and any additional name, and never withdraws the final
-///   name after cleanup uncertainty.
+/// Extraction requires a retained handle to the staged root before streaming
+/// content. Failure to obtain it can leave an empty entry if cleanup also
+/// fails. Any remaining `.incomplete` entry blocks a retry.
 ///
-/// A run that cannot hold a handle to the staged root fails before
-/// writing any plaintext, so a low open-file limit leaves at most an
-/// empty staged entry — which the removal may not be able to take
-/// away either, needing a descriptor of its own; the returned error
-/// then says so. A retry reports `Incomplete output already exists`.
+/// This policy applies to normal `Err` returns. Extraction does not run its
+/// cleanup during panic unwinding; a panic, process termination, or power loss
+/// can leave staged plaintext under either policy. The caller must inspect or
+/// remove that output explicitly.
 ///
-/// [`Self::RetainOnError`] is the opt-in for backup-recovery and
-/// forensic flows where partial plaintext is more useful than no
-/// plaintext.
-///
-/// The enum is `#[non_exhaustive]` so future releases can add richer
-/// recovery policies. It deliberately does not implement `Copy`: such a
-/// policy is configuration, and one may need to carry owned data — a
-/// destination directory for retained partial output, for example.
-///
-/// Note: this policy only governs cleanup of the `.incomplete` working
-/// tree after a normal `Err` return. Process termination (crash, SIGKILL,
-/// power loss) and panic unwinding bypass cleanup entirely, so a killed
-/// or panicking process can leave `.incomplete` output regardless of the
-/// policy. The library does not wrap extraction in `catch_unwind`; if a
-/// panic propagates out of `unarchive`, treat the working tree as if the
-/// process had been killed. It may contain authenticated but incomplete
-/// plaintext that the caller must inspect or remove explicitly.
+/// This enum deliberately does not implement `Copy`: future policies may
+/// carry owned configuration, such as a destination for retained output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IncompleteOutputPolicy {
@@ -117,9 +83,9 @@ pub enum IncompleteOutputPolicy {
     ///
     /// **Truncation-prefix caveat**: FerroCrypt's payload uses
     /// XChaCha20-Poly1305 STREAM-BE32, which authenticates each 64 KiB
-    /// chunk individually but does not detect truncation until the
-    /// final chunk's `last_flag` arrives. An attacker who can truncate
-    /// the ciphertext at a chunk boundary can therefore choose which
+    /// chunk individually. Completeness is established only by successfully
+    /// authenticating a final chunk with `last_flag = 1`. An attacker who
+    /// truncates the ciphertext at a chunk boundary can choose which
     /// authenticated plaintext prefix is retained. Callers who opt in
     /// to retention and act on partial output must treat the staged
     /// plaintext as a potentially attacker-chosen subset of the original,

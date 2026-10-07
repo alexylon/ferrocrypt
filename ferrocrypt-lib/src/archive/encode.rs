@@ -521,7 +521,7 @@ fn record_entry(
     Ok(())
 }
 
-/// Single source of truth for the "Input is a symlink: <path>"
+/// Single source of truth for the "Input is a symlink: {path}"
 /// rejection. Used by `validate_encrypt_input`, `build_manifest`'s
 /// input-root symlink check, and the Unix `open_no_follow`
 /// `ELOOP` arm.
@@ -532,7 +532,7 @@ fn input_is_symlink_error(path: &Path) -> CryptoError {
     ))
 }
 
-/// Single source of truth for the "Input <kind> changed while
+/// Single source of truth for the "Input {kind} changed while
 /// archiving" rejection: the object opened as the source root is not
 /// the one the pre-open `symlink_metadata` classified. `kind` is the
 /// root's kind — `"file"` or `"directory"`. Unix-only, because both
@@ -569,7 +569,7 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
 /// archiving: path" rejection, raised by [`require_same_source_file`]
 /// when a descendant reopened for the content pass is no longer the
 /// object the metadata pass recorded. Named for the source tree, to
-/// stay apart from the root's "Input <kind> changed while archiving".
+/// stay apart from the root's "Input {kind} changed while archiving".
 /// Unix-only, like [`input_changed_error`], because the comparison that
 /// raises it needs a stable `(dev, ino)` pair.
 #[cfg(unix)]
@@ -583,8 +583,7 @@ fn source_changed_error(path_text: &str) -> CryptoError {
 /// archiving (X -> Y): path" diagnostic. Emitted by both
 /// [`stream_single_file_root`] (single-file inputs, std-fs metadata)
 /// and [`stream_directory_descendant`] (directory descendants,
-/// cap-std metadata). Stable wording so downstream callers parsing
-/// the message see the same shape regardless of input kind.
+/// cap-std metadata), so both input kinds report size changes consistently.
 fn size_changed_error(expected: u64, observed: u64, path_text: &str) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Source file size changed while archiving ({expected} -> {observed}): {path_text}"
@@ -609,8 +608,8 @@ enum ArchiveSource {
 /// Builds a fully validated [`Manifest`] from the source tree under
 /// `input_path`, together with the [`ArchiveSource`] the content pass
 /// streams from. Single-file inputs produce a one-entry manifest with
-/// `root_is_file = true`; directory inputs produce a multi-entry
-/// manifest with `root_is_file = false`.
+/// `root_is_file = true`; directory inputs produce a manifest containing
+/// the root and any descendants, with `root_is_file = false`.
 fn build_manifest(
     input_path: &Path,
     limits: &ArchiveLimits,
@@ -1053,9 +1052,9 @@ fn stream_source_file<W: Write>(
 /// Single-file root content stream: reads from the handle held since
 /// the metadata pass, so no path is resolved again and a leaf or
 /// ancestor swap between the passes cannot substitute the source. The
-/// only mutation still reachable is through the file itself (same
-/// inode); the fresh length check below catches it. The type re-check
-/// is defense-in-depth at this re-use boundary. `source` is the
+/// remaining changes are in-place mutations of that file. The fresh length
+/// check detects size changes before copying, but not same-length writes.
+/// The type re-check is defense-in-depth at this re-use boundary. `source` is the
 /// original input path, used for diagnostics only.
 fn stream_single_file_root<W: Write>(
     entry: &ArchiveEntry,
@@ -1087,10 +1086,10 @@ fn source_shrank_error() -> CryptoError {
 /// Directory-descendant content stream: walks `rel` under `source_root`
 /// component-by-component through `cap_fs_ext::open_dir_nofollow`, then
 /// opens the leaf via the parent capability with `FollowSymlinks::No`.
-/// Closes the FORMAT.md §9.10 same-size-substitution surface that the
-/// path-based open could not — every intermediate directory is
-/// re-anchored to a capability handle, so a replacement between the
-/// metadata pass and the content pass fails the per-component open.
+/// No-follow traversal rejects symlink substitutions. After opening the file,
+/// the recorded identity (where available), type, and length are checked.
+/// Ordinary directory replacements do not necessarily fail the traversal;
+/// the file identity check detects a substituted leaf on supported filesystems.
 fn stream_directory_descendant<W: Write>(
     source_root: &Dir,
     entry: &ArchiveEntry,

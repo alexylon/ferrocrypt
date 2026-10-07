@@ -1,11 +1,8 @@
-//! Public coverage for the new `Encryptor` / `Decryptor` API.
+//! Direct coverage of the public `Encryptor` / `Decryptor` API.
 //!
-//! `integration_tests.rs` exercises round-trip behavior through the
-//! `passphrase_auto` / `recipient_auto` shims (which now wrap the new API
-//! internally). This file targets the new API surface directly so the
-//! builder methods, `Decryptor::open` mode classification, multi-
-//! recipient encrypt, and `EmptyRecipientList` rejection have explicit
-//! coverage independent of the shim implementation.
+//! Tests builder methods, mode classification, multiple recipients, resource
+//! limits, and error behavior without the automatic direction-selection
+//! helpers used by `integration_tests.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -791,12 +788,8 @@ fn key_generation_returns_a_recipient_string_matching_its_fingerprint() {
     );
 }
 
-/// `fast_passphrase_encryptor("")` must reject the empty passphrase
-/// at the top of `write`, before the input-existence check fires. Pins
-/// the cheap-caller-input-first ordering matching the deprecated
-/// `symmetric_encrypt` path so an empty passphrase against a missing
-/// input still surfaces the more actionable "Passphrase must not be
-/// empty" diagnostic.
+/// An empty passphrase is rejected before input-path validation, so a missing
+/// input does not hide the passphrase error.
 #[test]
 fn encryptor_passphrase_rejects_empty_before_input_check() {
     let work = fresh_workspace("empty_pass_before_input");
@@ -813,9 +806,7 @@ fn encryptor_passphrase_rejects_empty_before_input_check() {
     }
 }
 
-/// Pins the passphrase-redaction invariant on the new API. `Encryptor`
-/// embeds a `Passphrase` for the passphrase variant; this test fails
-/// fast if `Passphrase` is ever swapped for a raw `String`.
+/// `Encryptor` must redact its passphrase in `Debug` output.
 #[test]
 fn encryptor_debug_does_not_leak_passphrase() {
     const SECRET: &str = "totally-secret-passphrase-9F2";
@@ -998,22 +989,10 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     }
 }
 
-/// Encrypt-side `archive_limits` raised above the default while the
-/// reader uses [`ArchiveLimits::default`]: a file containing a path
-/// deeper than the reader's default `max_path_depth` (64) is rejected
-/// at extract time with the typed `path too deep` message,
-/// and the same file decrypts successfully when the reader raises
-/// `archive_limits` to match the writer.
-///
-/// Pins the documented asymmetry on
-/// [`PassphraseDecryptor::archive_limits`] / [`PrivateKeyDecryptor::archive_limits`]
-/// ("Must match (or exceed) the limits the writer used") as
-/// intentional behavior rather than implicit. `max_path_depth` is
-/// used because it is the only `ArchiveLimits` axis whose default cap
-/// (64) is small enough to exercise asymmetrically with a tractable
-/// fixture; `max_entry_count` (250 000) and
-/// `max_total_plaintext_bytes` (64 GiB) would each require an
-/// impractical fixture.
+/// A file whose path depth exceeds the reader's default cap is rejected
+/// with `ArchivePathDepthCapExceeded`. Raising the reader's cap to cover the
+/// actual depth allows decryption; this test uses the same raised limits on
+/// both sides.
 #[test]
 fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
     use ferrocrypt::ArchiveLimits;
@@ -1121,9 +1100,7 @@ fn archive_limits_raised_on_both_sides_round_trips() {
 /// MUST refuse the file with [`CryptoError::RecipientCountCapExceeded`];
 /// the same file MUST decrypt successfully when the caller raises the
 /// cap via [`Decryptor::open_with_limits`] /
-/// [`HeaderReadLimits::max_recipient_count`]. Pins the audit-flagged
-/// Low 2 finding closed at the public-API level (not just the
-/// internal parser).
+/// [`HeaderReadLimits::max_recipient_count`].
 #[test]
 fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     let work = fresh_workspace("recipient_count_above_default");
@@ -1934,14 +1911,8 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
     );
 }
 
-/// A second passphrase encrypt to a path already occupied by an `.fcr`
-/// file from the first run must reject *before* Argon2id fires. The
-/// output-precheck inside `protocol::encrypt` runs ahead of any KDF
-/// emission, so a `DerivingPassphraseWrapKey` event count of 0 on
-/// the failing run proves the user did not pay for a multi-second KDF
-/// just to learn the destination was occupied. Pinned as a regression
-/// for BUG_REVIEW #2 — without the preflight, the failure used to
-/// surface only after the KDF + recipient wrap + header build.
+/// An existing output is rejected before passphrase derivation. The failing
+/// run must emit no `DerivingPassphraseWrapKey` event.
 #[test]
 fn encryptor_passphrase_rejects_existing_output_before_kdf() {
     let work = fresh_workspace("rejects_existing_output_before_kdf");
@@ -1977,14 +1948,9 @@ fn encryptor_passphrase_rejects_existing_output_before_kdf() {
     );
 }
 
-/// Companion to the test above: a dangling symlink at the encrypt
-/// output path must reject up front. `Path::exists()` follows the link
-/// and would return `false` (target missing), letting Argon2id run
-/// before the atomic no-clobber rename finally refuses to overwrite.
-/// The fix routes the precheck through `symlink_metadata`, so a
-/// `DerivingPassphraseWrapKey` event count of 0 on the failing run
-/// proves the user did not pay for a multi-second KDF to learn that a
-/// stale symlink occupies the destination. Pinned for BUG_REVIEW #3.
+/// A dangling symlink at the output path is rejected before passphrase
+/// derivation. `symlink_metadata` detects the entry even though `Path::exists`
+/// reports that its target is missing.
 #[cfg(unix)]
 #[test]
 fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {

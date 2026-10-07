@@ -93,7 +93,8 @@ pub(crate) fn read_exact_or_truncated(
 
 // ─── Shared constants ──────────────────────────────────────────────────────
 
-/// 4-byte ASCII magic identifying every FerroCrypt artefact.
+/// Four-byte magic identifying binary `.fcr` and `private.key` files.
+/// Text `public.key` files use the `fcr1` prefix instead.
 pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 
 /// Length of [`MAGIC`] in bytes (`4`).
@@ -134,7 +135,7 @@ pub(crate) const KIND_PRIVATE_KEY: u8 = 0x4B; // 'K'
 /// as a `public.key`, before any other check (§8).
 pub(crate) const RECIPIENT_STRING_PREFIX: &[u8] = b"fcr1";
 
-/// Default file extension for encrypted FerroCrypt payload files.
+/// Default extension for encrypted FerroCrypt files, without the leading dot.
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 
 // ─── Encrypted file format (.fcr) ──────────────────────────────────────────
@@ -424,9 +425,9 @@ const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE
 /// Parsed `.fcr` 12-byte prefix. (`private.key` has its own 90-byte
 /// fixed header in `key/private.rs`; only the first 6 bytes —
 /// `magic || version || kind` — are layout-compatible.) Round-trips
-/// through [`Prefix::to_bytes`] and [`Prefix::parse`] are the
-/// writer/reader surface; both run the same per-field checks, except
-/// that only the writer refuses an undersized `header_len` — the
+/// through [`Prefix::build_encrypted`] and [`Prefix::parse`] apply
+/// structural validation; [`Prefix::to_bytes`] alone does not validate.
+/// Only the writer refuses an undersized `header_len` here — the
 /// reader defers that rule to `header_fixed` parsing (`FORMAT.md`
 /// §3.7).
 #[derive(Debug, Clone, Copy)]
@@ -747,10 +748,9 @@ pub(crate) fn compute_header_mac(
 /// header(header_len)`. See [`compute_header_mac`] for the MAC scope.
 ///
 /// Returns [`CryptoError::HeaderTampered`] on tag mismatch. In a
-/// multi-recipient decrypt loop, callers map the failure to the
-/// per-candidate "wrong recipient slot" diagnostic before continuing
-/// iteration; the bare `HeaderTampered` is correct only when no further
-/// recipient slot remains to try.
+/// recipient loop, the caller continues trying candidates and selects the
+/// final error from the recipient mode and whether any unwrap succeeded;
+/// see [`crate::protocol`].
 pub(crate) fn verify_header_mac(
     prefix_bytes: &[u8; PREFIX_SIZE],
     header_bytes: &[u8],

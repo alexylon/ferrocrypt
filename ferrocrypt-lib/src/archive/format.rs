@@ -243,8 +243,8 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// Used by both the encrypt-side content pass (source file → encrypted
 /// stream) and the decrypt-side content extraction (encrypted stream →
 /// output file). FORMAT.md §9.9: archive content bytes must not use
-/// unbounded `io::copy`, which would happily keep reading past `size`
-/// on a misbehaving reader.
+/// unbounded `io::copy`, which would consume following entries or newly
+/// appended source bytes after `size`.
 ///
 /// The buffer carries cleartext in both directions, so it is held in
 /// [`Zeroizing`] and wiped on every return path — matching the chunk
@@ -341,9 +341,9 @@ pub(crate) fn write_fca_header<W: Write>(
 }
 
 /// Parses and structurally validates the 27-byte FCA fixed header.
-/// All resource caps are applied here so downstream allocations
-/// (`archive_ext` buffer, manifest buffer, entry vector) are bounded
-/// by the time they fire.
+/// Applies the caps available from the fixed header: archive extension
+/// length, manifest length, entry count, and total file bytes. Per-entry
+/// limits are checked during manifest parsing.
 ///
 /// Field reads use `read_exact_fca`. If the payload ends before the full
 /// 27-byte header is available, the result is `MalformedArchive` with the
@@ -419,10 +419,9 @@ pub(crate) fn checked_entry_wire_len(path_len: usize, entry_ext_len: usize) -> O
 }
 
 /// Pre-computes the serialized manifest length with checked
-/// arithmetic before any allocation, validating per-entry mode and
-/// path-byte caps along the way. Caller invokes this BEFORE
-/// allocating the manifest buffer; if it returns an error, no
-/// allocation has happened.
+/// arithmetic, validating per-entry shape, limits, and TLV regions along
+/// the way. Call this before allocating the serialized manifest buffer.
+/// Validation itself may allocate temporary TLV state.
 pub(crate) fn checked_manifest_len(
     entries: &[ArchiveEntry],
     limits: ArchiveLimits,

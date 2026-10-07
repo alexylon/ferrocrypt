@@ -5,22 +5,19 @@
 //! `FERROCRYPT_FS_MATRIX_DIR` at the mount, and runs:
 //!
 //! ```text
-//! cargo test --test archive_fs_matrix -- --ignored
+//! cargo test --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Each test sources its tempdir from
 //! [`ferrocrypt_test_support::fs_matrix_tempdir`], which honours the env
 //! var when set and falls back to the system temp dir otherwise. Running
 //! these tests outside a matrix lane (with the env var unset) still works
-//! and just exercises the default filesystem — useful for local sanity
-//! checking before shipping the YAML lane.
+//! and exercises the default filesystem.
 //!
-//! These are deliberately lightweight: a single-file round-trip, a
-//! small directory-tree round-trip, and key-pair generation. The matrix
-//! lane is meant to catch filesystem-quirk regressions (case-folding,
-//! missing rwx bits, short-write semantics on FAT-family filesystems) —
-//! not to re-run the full suite. Substantial coverage already lives in
-//! the in-tree `archive::*::tests` modules.
+//! Coverage includes file and directory round trips, key generation,
+//! no-clobber conflicts, permission handling, failed-extraction cleanup, and
+//! staging residue. These tests complement the more detailed unit tests in
+//! `archive` and `fs`.
 
 mod common;
 

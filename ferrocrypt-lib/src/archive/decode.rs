@@ -78,8 +78,8 @@ use super::reasons::{
     MANIFEST_PLATFORM_LIMIT, MANIFEST_REGION_TRUNCATED, TRAILING_FILE_CONTENT,
 };
 
-/// Public entry point. Parses an FCA payload from `reader`, fully
-/// validates it before any output is created, and extracts the archive
+/// Crate-internal extraction entry point. Validates the FCA header and
+/// complete manifest before creating output, then streams file contents
 /// under `output_dir`. Returns the final output path on success.
 ///
 /// On error before final promotion, applies `policy` to the staged
@@ -1641,9 +1641,10 @@ fn remove_staged_directory(
     CleanupOutcome::from_removal(output_handle.remove_dir_all(working_name))
 }
 
-/// Builds the "Output already exists: <dir>/<root>" rejection via the
+/// Builds the "Output already exists: {dir}/{root}" rejection via the
 /// shared constructor: the operator-chosen output directory renders
-/// raw and untruncated, and the archive-chosen root name — the final
+/// without truncation, with control and bidirectional characters escaped;
+/// the archive-chosen root name — the final
 /// component — is escaped and bounded. Used by the step-8 occupancy
 /// pre-check and the step-15 promotion failure.
 fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
@@ -1666,7 +1667,7 @@ const INCOMPLETE_OUTPUT_LABEL: &str = "Incomplete output";
 /// operator which entry the target filesystem could not keep apart.
 const ARCHIVE_PATH_COLLIDES: &str = "Archive path collides with an existing entry";
 
-/// Builds the "Incomplete output already exists: <dir>/<root>.incomplete"
+/// Builds the "Incomplete output already exists: {dir}/{root}.incomplete"
 /// rejection via the shared constructor, the same way as
 /// [`output_already_exists`]: the operator-chosen output directory
 /// renders readable and untruncated, and the archive-chosen working
@@ -1675,7 +1676,7 @@ fn incomplete_output_exists(output_dir: &Path, working_name: &OsStr) -> CryptoEr
     already_exists_error(INCOMPLETE_OUTPUT_LABEL, &output_dir.join(working_name))
 }
 
-/// Builds the "Archive path collides with an existing entry: <path>"
+/// Builds the "Archive path collides with an existing entry: {path}"
 /// rejection. The whole path is archive-derived, so all of it goes
 /// through the strict, truncating sanitizer.
 fn archive_path_collides(path_utf8: &str) -> CryptoError {
@@ -3226,19 +3227,9 @@ mod tests {
         );
     }
 
-    /// `IncompleteOutputPolicy` doc-comment promises that panic-unwind
-    /// (like SIGKILL or power loss) bypasses cleanup entirely:
-    /// `.incomplete` survives regardless of policy. The cleanup loop
-    /// in `unarchive` runs only after `unarchive_inner` returns
-    /// `Err`; an unwind propagates past it without firing.
-    ///
-    /// Pin the property: drive `unarchive` with a `Read` impl that
-    /// panics partway through content streaming (after `.incomplete`
-    /// has been created via `create_file_at`), `catch_unwind` the
-    /// panic, and assert the staged file is still on disk despite
-    /// `DeleteOnError`. Without this guarantee a panicking process
-    /// would silently lose authenticated-but-incomplete plaintext
-    /// the caller may need for forensic recovery.
+    /// Records the current panic behavior: cleanup runs on a returned error,
+    /// not during unwinding. A reader panic after staging therefore leaves
+    /// `.incomplete` output even under `DeleteOnError`.
     #[test]
     fn panic_during_extraction_preserves_incomplete_under_delete_on_error() {
         use std::panic::AssertUnwindSafe;

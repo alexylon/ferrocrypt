@@ -10,7 +10,7 @@ use crate::recipient::policy::MixingPolicy;
 /// message. The longest interpolating message (`IncompatibleRecipients`)
 /// has 41 chars of fixed wording, leaving 23 within the 64-char desktop
 /// status-line budget enforced by
-/// [`tests::user_facing_messages_fit_status_line_budget`]; 13 are used.
+/// `tests::user_facing_messages_fit_status_line_budget`; 13 are used.
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
@@ -322,111 +322,36 @@ impl std::fmt::Display for PathSuffix<'_> {
     }
 }
 
-/// Errors that can occur during key generation, encryption, or decryption.
+/// Errors from key generation, encryption, decryption, and validation.
 ///
-/// All `Display` messages are short, user-facing, and free of internal
-/// type names so that consumers can surface them directly without
-/// additional mapping. Stable library-owned messages use sentence case
-/// without terminal punctuation. Lowercase archive reasons and internal
-/// markers are fragments rendered after a capitalized prefix. Transparent
-/// operating-system errors and caller/path text may retain their own
-/// punctuation.
+/// Match on variants and structured fields for programmatic handling; use
+/// [`std::fmt::Display`] for user-facing diagnostics. `FORMAT.md` §12.1 fixes
+/// the display forms of version errors ([`UnsupportedVersion`] and
+/// [`FormatDefect::UnsupportedArchiveVersion`]) and
+/// [`FormatDefect::UnknownCriticalTag`]. Other message text and archive `reason`
+/// strings may change. Use structured errors rather than parsing display text,
+/// including the fixed forms. Match with a wildcard arm for future variants.
 ///
-/// # Design: identity-only where possible
+/// Format, version, and KDF defects carry typed reasons. Resource-cap errors
+/// identify the configured cap and, where available, the requested value.
+/// Recipient errors identify a recipient type, not an individual slot.
+/// Archive path errors include a
+/// sanitized entry path, which may be escaped or truncated and must not be
+/// used as a filesystem path.
 ///
-/// Most variants are **identity-only**: they carry no per-operation
-/// context (no paths, no byte offsets, no wrapped error text), because
-/// that context belongs at the *caller*, not inside the error. A CLI
-/// frontend can prepend the file path if it wants to; a GUI can elide
-/// it; a server can log structured fields. The library stays agnostic.
+/// [`Self::InvalidInput`] carries a free-form explanation of invalid caller
+/// input, unsupported source objects, path conflicts, or detected filesystem
+/// replacement. [`Self::Io`] carries an I/O error. Parsed archive defects use
+/// the archive-specific variants instead of `InvalidInput`.
 ///
-/// Variants that do carry data carry *typed structured data*, not
-/// heap-allocated strings:
-/// - [`CryptoError::InvalidFormat`] carries a [`FormatDefect`]
-/// - [`CryptoError::UnsupportedVersion`] carries an [`UnsupportedVersion`]
-/// - [`CryptoError::InvalidKdfParams`] carries an [`InvalidKdfParams`]
-/// - [`CryptoError::InternalInvariant`] and [`CryptoError::InternalCryptoFailure`]
-///   carry a `&'static str` marker (no heap allocation)
-/// - The `*CapExceeded` variants ([`CryptoError::HeaderLenCapExceeded`],
-///   [`CryptoError::RecipientCountCapExceeded`],
-///   [`CryptoError::RecipientBodyCapExceeded`],
-///   [`CryptoError::HeaderMacWorkCapExceeded`],
-///   [`CryptoError::RecipientStringCapExceeded`],
-///   [`CryptoError::KdfResourceCapExceeded`],
-///   [`CryptoError::KdfTimeCostCapExceeded`],
-///   [`CryptoError::KdfLanesCapExceeded`],
-///   [`CryptoError::KdfWorkCapExceeded`],
-///   [`CryptoError::PrivateKeyWrappedSecretCapExceeded`], and the
-///   `Archive*CapExceeded` family for the `FORMAT.md` §9.12 caps) each
-///   carry the offending value plus the configured local cap as named
-///   integer fields, matching the "distinct resource-cap error" classes
-///   that `FORMAT.md` §3.2 / §12 enumerate
-/// - The archive defect variants ([`CryptoError::MalformedArchive`],
-///   [`CryptoError::UnsafeArchivePath`],
-///   [`CryptoError::InvalidArchiveTree`]) carry a static `reason`
-///   describing the violated rule in words for people, which may change
-///   in any release (the variant is the stable category); the
-///   path-carrying ones also carry the offending entry path, sanitized
-///   for display (control and non-ASCII characters escaped, long paths
-///   truncated), because an attacker-crafted archive can hold thousands
-///   of entries and the path is the only way to locate the bad one
-/// - The multi-recipient diagnostics ([`CryptoError::RecipientUnwrapFailed`],
-///   [`CryptoError::HeaderMacFailedAfterUnwrap`],
-///   [`CryptoError::UnknownCriticalRecipient`],
-///   [`CryptoError::IncompatibleRecipients`]) each carry the
-///   `type_name` so callers can tell which recipient slot raised them
+/// An error does not guarantee that nothing was written. Post-commit errors
+/// describe complete output that may remain on disk. Failed cleanup is
+/// appended to the original diagnostic; if its variant cannot carry that
+/// report, the error becomes [`Self::Io`]. See [`crate::IncompleteOutputPolicy`]
+/// for decryption cleanup and retention behavior.
 ///
-/// Consumers can pattern-match on these shapes without substring
-/// comparisons. Which rule failed inside one archive variant is named only
-/// by its `reason` text and is not part of that stable shape.
-///
-/// # Evolution
-///
-/// New failure classes arrive as new variants, which the enum-level
-/// `#[non_exhaustive]` absorbs. The field set of every existing variant
-/// is frozen: new information about an existing class also arrives as a
-/// new variant, never as a new field, so downstream `match` patterns
-/// keep compiling and externally constructed values stay possible.
-///
-/// # The one escape hatch: [`CryptoError::InvalidInput`]
-///
-/// One variant — [`CryptoError::InvalidInput`] — carries a free-form
-/// `String`. It is the **designated heterogeneous caller-input
-/// bucket** for fail-closed rejections whose only useful context is
-/// a path or short token that has to be echoed back to the user.
-/// Concretely it covers:
-///
-/// - **encrypt-side source-tree problems**: "Input is a symlink:
-///   `path`", "Source is no longer a regular file: `name`",
-///   "Unsupported file type: `path`". The source tree belongs to the
-///   caller's environment, so these are caller-input rejections, not
-///   format defects. Every embedded path or name — caller-supplied
-///   top-level paths included — is sanitized via
-///   `sanitize_for_display` / `sanitize_path_for_display` before
-///   embedding.
-/// - **Caller-invocation path conflicts and shape rejections**:
-///   "Output already exists: `path`", "Key file already exists:
-///   `path`", "Invalid recipient public key". These surface *which*
-///   user-supplied path or value triggered the rejection so
-///   operators can fix it without extra debugging. The conflict
-///   messages keep the parent directory readable and untruncated (it
-///   is the caller's trust boundary) while escaping control and bidi
-///   characters in it, and escape the final component — which can be
-///   attacker-influenced — more strictly.
-/// - **Caller-supplied config values** outside the valid range:
-///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
-///   empty".
-///
-/// Rejections of a *parsed archive payload* — a malicious or corrupt
-/// FCA inside the decrypted stream — are **not** `InvalidInput`: they
-/// surface as [`CryptoError::MalformedArchive`],
-/// [`CryptoError::UnsafeArchivePath`],
-/// [`CryptoError::InvalidArchiveTree`], or the `Archive*CapExceeded`
-/// family, because they describe the file, not the caller.
-///
-/// Library consumers treat `InvalidInput` as an opaque string and
-/// surface it via `Display`; the CLI and desktop frontends do exactly
-/// that.
+/// Existing variants retain their field sets; additional failure information
+/// requiring a different shape is represented by a new variant.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum CryptoError {
@@ -453,11 +378,11 @@ pub enum CryptoError {
     UnsupportedVersion(UnsupportedVersion),
 
     // ─── Key derivation & work limits ────────────────────────────────────
-    /// KDF parameters read from an untrusted header are outside safe
-    /// structural bounds.
+    /// Stored or caller-supplied KDF parameters violate the format
+    /// structural bounds. Raising resource limits cannot make them valid.
     #[error("{0}")]
     InvalidKdfParams(InvalidKdfParams),
-    /// Argon2id memory cost from a header exceeds the caller-configured
+    /// Stored or requested Argon2id memory cost exceeds the caller-configured
     /// local resource cap. Per `FORMAT.md` §3.2, exceeding a local cap
     /// produces a distinct resource-cap error rather than a generic
     /// malformed-file error. Distinct from
@@ -466,12 +391,12 @@ pub enum CryptoError {
     /// spend.
     #[error("Passphrase memory over limit ({mem_cost_kib} KiB, limit {local_cap_kib})")]
     KdfResourceCapExceeded {
-        /// Memory cost requested by the untrusted header, in KiB.
+        /// Stored or requested memory cost, in KiB.
         mem_cost_kib: u32,
         /// Maximum memory cost accepted by the caller's local policy, in KiB.
         local_cap_kib: u32,
     },
-    /// Argon2id time cost (iteration count) from a header exceeds the
+    /// Stored or requested Argon2id time cost (iteration count) exceeds the
     /// caller-configured local cap. The time-dimension counterpart of
     /// [`Self::KdfResourceCapExceeded`]: the value is structurally valid
     /// (within the format maximum) but asks for more iterations than the policy
@@ -479,33 +404,30 @@ pub enum CryptoError {
     /// only when a caller tightens `KdfLimit` below that maximum.
     #[error("Passphrase time over limit ({time_cost}, limit {local_cap})")]
     KdfTimeCostCapExceeded {
-        /// Time cost (iteration count) requested by the untrusted header.
+        /// Stored or requested time cost (iteration count).
         time_cost: u32,
         /// Maximum time cost accepted by the caller's local policy.
         local_cap: u32,
     },
-    /// Argon2id lane count (parallelism) from a header exceeds the
+    /// Stored or requested Argon2id lane count (parallelism) exceeds the
     /// caller-configured local cap. The parallelism-dimension counterpart of
     /// [`Self::KdfResourceCapExceeded`]; like [`Self::KdfTimeCostCapExceeded`],
     /// the default cap is the format maximum, so this variant is returned only when
     /// a caller tightens `KdfLimit` below that maximum.
     #[error("Passphrase parallelism over limit ({lanes}, limit {local_cap})")]
     KdfLanesCapExceeded {
-        /// Lane count (parallelism) requested by the untrusted header.
+        /// Stored or requested lane count (parallelism).
         lanes: u32,
         /// Maximum lane count accepted by the caller's local policy.
         local_cap: u32,
     },
-    /// Combined Argon2id work from a header — memory cost in KiB multiplied by
-    /// time cost — exceeds the caller-configured local cap. Bounds how long one
-    /// derivation runs, where [`Self::KdfResourceCapExceeded`] bounds how much
-    /// memory it holds; neither implies the other, so a header within the
-    /// memory cap can still be refused here. The default budget is the writer's
-    /// own (1 GiB × 4 passes), so a file this library produced at its defaults
-    /// always decrypts; raise it with `KdfLimit::max_work`.
+    /// Stored or requested Argon2id work exceeds the configured cap.
+    /// Work is memory cost in KiB multiplied by iteration count; it estimates
+    /// computation rather than imposing a wall-clock timeout. The default is
+    /// 1 GiB × 4 passes. Raise it with [`crate::KdfLimit::max_work`] when needed.
     #[error("Passphrase work over limit ({work} KiB-passes, limit {local_cap})")]
     KdfWorkCapExceeded {
-        /// Combined work requested by the untrusted header, in KiB-passes.
+        /// Stored or requested work, in KiB-passes.
         work: u64,
         /// Maximum combined work accepted by the caller's local policy.
         local_cap: u64,
@@ -515,7 +437,7 @@ pub enum CryptoError {
     /// encryption / key sealing), so a caller cannot accidentally seal an
     /// artefact with weak Argon2id memory. The floor is a writer policy
     /// only: readers accept any structurally valid, within-cap parameters,
-    /// so a file written before the floor existed always decrypts.
+    /// so the floor does not itself prevent reading older files.
     #[error("Passphrase memory too low ({mem_cost_kib} KiB, needs {floor_kib} KiB)")]
     KdfBelowWriteFloor {
         /// Memory cost the caller requested, in KiB.
@@ -561,8 +483,8 @@ pub enum CryptoError {
     /// §3.3) is much higher; this fires when the body would exceed the
     /// caller-configured local cap (`FORMAT.md` §3.2 recommends 8 KiB
     /// for untrusted input). Distinct from
-    /// [`FormatDefect::MalformedRecipientEntry`]: the file is
-    /// structurally valid; the reader's resource policy is the
+    /// [`FormatDefect::MalformedRecipientEntry`]: the body length fits the
+    /// structural maximum, but the resource policy is the
     /// constraint, and callers may raise the cap for trusted input.
     #[error("Recipient data too large ({body_len} bytes, limit {local_cap})")]
     RecipientBodyCapExceeded {
@@ -575,9 +497,9 @@ pub enum CryptoError {
     /// bytes than the local resource cap allows.
     ///
     /// Each candidate recipient authenticates the whole `prefix ||
-    /// header` (`FORMAT.md` §3.6), so the work is the recipient count
-    /// times the header size. The per-dimension caps bound each factor
-    /// on its own; this one bounds the product. Raise it with
+    /// header` (`FORMAT.md` §3.6), so the worst-case work is the supported
+    /// recipient count multiplied by the prefix and header length. The
+    /// per-dimension caps bound each factor; this one bounds the product. Raise it with
     /// [`crate::HeaderReadLimits::max_header_mac_work_bytes`] for files
     /// from a known origin that legitimately combine many recipients
     /// with a large header. Readers report it before any private-key
@@ -626,8 +548,8 @@ pub enum CryptoError {
     // ─── Authentication failures ─────────────────────────────────────────
     /// Unlocking the `private.key` file failed AEAD authentication. The
     /// key file is structurally valid, but either the supplied
-    /// passphrase does not decrypt it, or its cleartext fields have
-    /// been tampered with after the file was written. The AEAD
+    /// passphrase does not decrypt it, or its authenticated cleartext or
+    /// wrapped secret was modified or corrupted. The AEAD
     /// primitive cannot distinguish the two cases — the associated-data
     /// binding in the `private.key` format catches tampering
     /// cryptographically, but both failure modes surface as the same
@@ -639,8 +561,9 @@ pub enum CryptoError {
     ///
     /// Per `FORMAT.md` §3.7, a recipient unwrap is not accepted until
     /// the candidate key verifies the header MAC. The failed MAC shows
-    /// the MAC-covered bytes changed after the file was written, but
-    /// cannot distinguish deliberate tampering from storage corruption.
+    /// that the candidate key and stored header do not authenticate together.
+    /// This can result from tampering, storage corruption, or a malformed
+    /// file produced by its sender.
     /// This variant is the passphrase-mode verdict; the public-key
     /// decrypt path reports the same condition as
     /// [`Self::HeaderMacFailedAfterUnwrap`], whatever the recipient
@@ -710,19 +633,15 @@ pub enum CryptoError {
     /// recipient mode (e.g. a passphrase decryptor invoked against a file
     /// sealed to public-key recipients, or vice versa).
     ///
-    /// [`crate::Decryptor::open`] classifies the file at a path and hands back
-    /// the matching variant, so a caller that follows it reaches this error
-    /// only when the path stops naming that file: each `decrypt` reads the
-    /// header again, and a rename or overwrite in between — no attacker
-    /// needed — is refused here rather than decrypted. An internal caller or a
-    /// future plugin-style API that drives `protocol::decrypt` directly with a
-    /// mismatched credential scheme receives the same variant.
+    /// [`crate::Decryptor::open`] classifies the path structurally. Decryption
+    /// opens that path again and reports this error if the newly read header
+    /// has a different mode. A replacement with the same mode is processed
+    /// normally. Internal calls with a mismatched credential scheme can also
+    /// return this error.
     ///
-    /// `expected` is the mode the decryptor expected (its credential-scheme
-    /// mode); `found` is the mode classified from the file's recipient
-    /// list. Distinct from [`Self::NoSupportedRecipient`], which means
-    /// "the file's recipient list contains no entry I can unlock,"
-    /// not "I'm the wrong tool for this file."
+    /// `expected` is the credential's mode; `found` is the newly classified
+    /// mode. [`Self::NoSupportedRecipient`] instead means that the file has
+    /// no recipient type this build supports.
     #[error("File is {found} encrypted; use {}", found.credential_name())]
     DecryptorModeMismatch {
         /// Decryptor mode selected by the caller.
@@ -743,7 +662,7 @@ pub enum CryptoError {
     /// types must appear alone, and readers must reject the mix
     /// structurally before running any KDF.
     ///
-    /// `type_name` identifies which entry triggered the rejection;
+    /// `type_name` identifies the recipient type that triggered the rejection;
     /// `policy` carries the [`MixingPolicy`] projection the offending
     /// rule declared, so callers can pattern-match without parsing the
     /// message. Future native types whose compatibility class differs
@@ -765,12 +684,12 @@ pub enum CryptoError {
         policy: MixingPolicy,
     },
     /// An encrypted payload chunk failed AEAD authentication during
-    /// streaming decryption. The ciphertext was modified or corrupted
-    /// after the header was authenticated.
+    /// streaming decryption after header authentication. The ciphertext may
+    /// be modified, corrupted, truncated, or inconsistent with the header.
     #[error("Decryption failed: file data was modified or corrupted")]
     PayloadTampered,
     /// The encrypted payload region is empty, so the stream carries no
-    /// chunk at all. A file cut anywhere after its first chunk surfaces
+    /// chunk at all. Any non-empty truncated payload surfaces
     /// as [`Self::PayloadTampered`] instead, because a truncated tail
     /// and a tampered tail cannot be told apart.
     #[error("Encrypted file is truncated")]
@@ -839,7 +758,7 @@ pub enum CryptoError {
         reason: &'static str,
     },
     /// Archive entry count exceeds the configured
-    /// [`ArchiveLimits::max_entry_count`](crate::ArchiveLimits) cap
+    /// [`ArchiveLimits::max_entry_count`](crate::ArchiveLimits::max_entry_count) cap
     /// (`FORMAT.md` §9.12). Like every `Archive*CapExceeded` variant,
     /// this is a resource-policy rejection, not a format defect, and is
     /// enforced identically on encrypt and decrypt.
@@ -855,7 +774,7 @@ pub enum CryptoError {
     // remain available to callers: total bytes, manifest length, archive
     // extension length, entry extension length, and total entry extensions.
     /// Total plaintext bytes exceed the configured
-    /// [`ArchiveLimits::max_total_plaintext_bytes`](crate::ArchiveLimits)
+    /// [`ArchiveLimits::max_total_plaintext_bytes`](crate::ArchiveLimits::max_total_plaintext_bytes)
     /// cap (`FORMAT.md` §9.12).
     #[error("Archive is too large (limit {local_cap} bytes)")]
     ArchiveTotalBytesCapExceeded {
@@ -865,7 +784,7 @@ pub enum CryptoError {
         local_cap: u64,
     },
     /// Serialized manifest length exceeds the configured
-    /// [`ArchiveLimits::max_manifest_bytes`](crate::ArchiveLimits) cap
+    /// [`ArchiveLimits::max_manifest_bytes`](crate::ArchiveLimits::max_manifest_bytes) cap
     /// (`FORMAT.md` §9.12).
     #[error("Archive manifest is too large (limit {local_cap} bytes)")]
     ArchiveManifestLenCapExceeded {
@@ -876,7 +795,7 @@ pub enum CryptoError {
         local_cap: u32,
     },
     /// An entry path's UTF-8 byte length exceeds the configured
-    /// [`ArchiveLimits::max_path_bytes`](crate::ArchiveLimits) cap
+    /// [`ArchiveLimits::max_path_bytes`](crate::ArchiveLimits::max_path_bytes) cap
     /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
     /// declared length before the path bytes have been parsed.
     #[error(
@@ -892,7 +811,7 @@ pub enum CryptoError {
         path: Option<String>,
     },
     /// An entry path's component depth exceeds the configured
-    /// [`ArchiveLimits::max_path_depth`](crate::ArchiveLimits) cap
+    /// [`ArchiveLimits::max_path_depth`](crate::ArchiveLimits::max_path_depth) cap
     /// (`FORMAT.md` §9.12).
     #[error("Archive path too deep ({depth} components, limit {local_cap}): {path}")]
     ArchivePathDepthCapExceeded {
@@ -904,7 +823,7 @@ pub enum CryptoError {
         path: String,
     },
     /// The archive-level extension region exceeds the configured
-    /// [`ArchiveLimits::max_archive_ext_bytes`](crate::ArchiveLimits)
+    /// [`ArchiveLimits::max_archive_ext_bytes`](crate::ArchiveLimits::max_archive_ext_bytes)
     /// cap (`FORMAT.md` §9.12).
     #[error("Archive extension is too large (limit {local_cap} bytes)")]
     ArchiveExtLenCapExceeded {
@@ -914,7 +833,7 @@ pub enum CryptoError {
         local_cap: u32,
     },
     /// A per-entry extension region exceeds the configured
-    /// [`ArchiveLimits::max_entry_ext_bytes`](crate::ArchiveLimits) cap
+    /// [`ArchiveLimits::max_entry_ext_bytes`](crate::ArchiveLimits::max_entry_ext_bytes) cap
     /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
     /// declared length before the entry's path has been parsed.
     #[error(
@@ -930,7 +849,7 @@ pub enum CryptoError {
         path: Option<String>,
     },
     /// The summed per-entry extension regions exceed the configured
-    /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits)
+    /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits::max_total_entry_ext_bytes)
     /// cap (`FORMAT.md` §9.12).
     #[error("Archive entry extensions are too large (limit {local_cap} bytes)")]
     ArchiveTotalEntryExtCapExceeded {
@@ -959,8 +878,7 @@ pub enum CryptoError {
 /// Structural defects detected while parsing a FerroCrypt encrypted file
 /// or key file. Carried inside [`CryptoError::InvalidFormat`] so format
 /// failures can be pattern-matched without substring comparisons and
-/// without heap-allocated `String`s. That promise is also what lets the
-/// enum stay `Copy` while it remains `#[non_exhaustive]`.
+/// without parsing display text.
 ///
 /// Each variant is the most granular structural class `FORMAT.md` §12
 /// admits. Resource-cap exceedances are *not* `FormatDefect`s — they
@@ -968,6 +886,9 @@ pub enum CryptoError {
 /// (e.g. [`FormatDefect::OversizedHeader`] is the structural max
 /// violation; the local-cap counterpart is
 /// [`CryptoError::HeaderLenCapExceeded`]).
+///
+/// This enum remains `Copy`: structural defects carry values that can be
+/// pattern-matched without heap-allocated strings, including future variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FormatDefect {
@@ -995,7 +916,8 @@ pub enum FormatDefect {
         len: u32,
     },
     /// A TLV entry in the extension region is malformed: bad ordering,
-    /// duplicate tag, or `len` extends past the end of the region.
+    /// duplicate or reserved tag, incomplete entry header, or a value length
+    /// exceeding the region or configured per-value cap.
     /// `FORMAT.md` §6.
     MalformedTlv,
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
@@ -1007,8 +929,8 @@ pub enum FormatDefect {
         /// Unknown critical TLV tag value.
         tag: u16,
     },
-    /// Leading magic bytes do not match `"FCR\0"` — not a FerroCrypt
-    /// key file. Key-file analogue of [`FormatDefect::BadMagic`].
+    /// Input is not recognized as a key file: a private key has incorrect
+    /// magic bytes, or a public key file is not valid UTF-8.
     NotAKeyFile,
     /// A private-key operation was given a file that starts like a
     /// `public.key`, with `fcr1`, or a public-key operation was given one with
@@ -1077,17 +999,18 @@ pub enum FormatDefect {
     /// truncated, length fields out of range, declared entry size
     /// exceeds the bytes available, or the recipient region's per-entry
     /// total accounting doesn't add up to `recipient_entries_len`.
-    /// `FORMAT.md` §3.3.
+    /// Also covers invalid native flags, body lengths, public-key encodings,
+    /// and all-zero X25519 shared secrets (`FORMAT.md` §4).
     MalformedRecipientEntry,
     /// Recipient entry has reserved bits set in `recipient_flags`. Per
     /// `FORMAT.md` §3.4, only bit 0 (the `critical` flag) is defined;
     /// all other bits must be zero on the wire.
     RecipientFlagsReserved,
-    /// `private.key` cleartext header is structurally invalid: bad
-    /// magic-after-prefix-checks, non-zero `key_flags`, length fields
-    /// out of structural range, declared variable fields exceed the
-    /// file size, or trailing bytes after the wrapped secret. Per
-    /// `FORMAT.md` §8.
+    /// A `private.key` violates its structural or authenticated consistency
+    /// rules: a short header, reserved version or flags, invalid lengths,
+    /// mismatched total size, or invalid native key material. After unlock,
+    /// this also covers a stored public key that does not match the secret.
+    /// Incorrect magic returns [`Self::NotAKeyFile`] instead.
     MalformedPrivateKey,
     /// Inner FCA archive `version` byte is a nonzero value this release
     /// cannot read (zero is reserved and rejects as malformed). Distinct
@@ -1261,10 +1184,14 @@ impl std::fmt::Display for UnsupportedVersion {
     }
 }
 
-/// Which KDF parameter from an untrusted header failed its structural
-/// bound check. Carries the raw value so callers can decide whether to
-/// re-try with looser limits. Every variant carries one number and
-/// nothing else, which is what lets the enum stay `Copy`.
+/// KDF parameter that violates a format structural bound.
+///
+/// Carries the invalid stored or caller-supplied value. These bounds cannot
+/// be relaxed with [`crate::KdfLimit`]; resource-policy failures use the
+/// `Kdf*CapExceeded` variants of [`CryptoError`] instead.
+///
+/// This enum remains `Copy`: each variant carries one numeric parameter value,
+/// including future variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidKdfParams {
@@ -1315,9 +1242,8 @@ pub(crate) enum StreamError {
     /// earlier via [`StreamError::DecryptAead`] (STREAM-BE32's
     /// per-chunk nonce binding rejects a naive append as an AEAD
     /// tamper); this variant is the defense-in-depth path for
-    /// pathological readers that signal EOF at the chunk boundary
-    /// and then yield more bytes (non-blocking sockets, buggy
-    /// `Take`-style wrappers). Downcast to
+    /// readers that signal EOF at a chunk boundary and later yield more
+    /// bytes, such as a file growing during reading. Downcast to
     /// [`CryptoError::ExtraDataAfterPayload`] via `From<io::Error>`.
     ExtraData,
     /// Writer or reader state is no longer available. This occurs after a

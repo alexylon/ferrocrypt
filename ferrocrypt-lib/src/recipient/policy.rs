@@ -129,21 +129,15 @@ impl NativeRecipientType {
 /// Public diagnostic category for a recipient mixing rule, surfaced
 /// through [`CryptoError::IncompatibleRecipients`].
 ///
-/// This is intentionally not the full internal enforcement representation
-/// — that is the crate-private `NativeMixingRule` type, which can express
-/// new native compatibility classes without adding public enum variants.
-/// [`MixingPolicy::Custom`] is the catch-all for compatibility classes
-/// that do not match the two fixed shorthand variants below; the
-/// associated `compatibility_class` string preserves which class the
-/// offending rule declared, so programmatic diagnostics can distinguish
-/// (for example) a post-quantum class clash from any future custom class.
+/// [`MixingPolicy::Custom`] identifies compatibility classes outside the two
+/// built-in categories. Its `compatibility_class` field lets callers distinguish
+/// those classes without parsing the error message.
 ///
-/// The enum is `#[non_exhaustive]` so future native rules can be added
-/// without a breaking API change. New rule information also arrives as
-/// a new variant — the fields of the existing variants are frozen.
-/// It deliberately does not implement `Copy`: today's class identifiers
-/// are `&'static str` only because the registry is compile-time, and
-/// `Copy` would restrict every future variant to that same shape.
+/// This enum is non-exhaustive. New rules may add variants; the fields of
+/// existing variants remain unchanged.
+///
+/// This enum deliberately does not implement `Copy`: future variants may
+/// carry owned data even though current class identifiers are static strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {
@@ -156,10 +150,8 @@ pub enum MixingPolicy {
     /// the same compatibility class. Currently: `x25519`.
     PublicKeyMixable,
     /// A recipient-specific compatibility class not represented by the
-    /// fixed shorthand variants above. The `compatibility_class` field
-    /// carries the class identifier the offending rule declared so a
-    /// caller can distinguish — for example — a post-quantum class
-    /// clash (`"postquantum"`) from a future custom class.
+    /// built-in categories above. The field identifies the class declared
+    /// by the incompatible recipient's rule.
     Custom {
         /// Class identifier as declared by the recipient type's
         /// crate-private mixing rule. Stable per native type within a
@@ -190,9 +182,7 @@ pub(crate) enum NativeMixingRule {
     /// The recipient type may coexist with other entries declaring the
     /// same compatibility class. Two `Class` rules are compatible when
     /// their `name` fields are exactly equal. Currently: `x25519`
-    /// declares `Class { name: PUBLIC_KEY_CLASS }`; the upcoming
-    /// `x25519-mlkem768` would declare
-    /// `Class { name: POST_QUANTUM_CLASS }`.
+    /// declares `Class { name: PUBLIC_KEY_CLASS }`.
     Class {
         /// Compatibility-class identifier, fixed per native recipient
         /// type and never appearing on the wire.
@@ -205,9 +195,8 @@ impl NativeMixingRule {
     /// unconstrained compatibility group.
     pub(crate) const PUBLIC_KEY_CLASS: &'static str = "public-key";
 
-    /// Class for native post-quantum or hybrid-PQ recipients (reserved
-    /// for the upcoming `x25519-mlkem768` recipient type and any future
-    /// native PQ recipient sharing the same compatibility class).
+    /// Reserved compatibility class for native post-quantum or hybrid
+    /// recipients. No current native recipient uses it.
     #[allow(dead_code)] // referenced by the upcoming PQ recipient PR
     pub(crate) const POST_QUANTUM_CLASS: &'static str = "postquantum";
 

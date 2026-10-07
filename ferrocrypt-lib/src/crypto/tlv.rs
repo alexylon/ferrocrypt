@@ -46,12 +46,10 @@ pub(crate) struct RawTlv<'a> {
 /// Classifies a TLV tag and rejects the two reserved values
 /// (`0x0000`, `0x8000`). Pure function; no allocation.
 ///
-/// Written as an if/else ladder rather than a `match` because
-/// rust-analyzer's match-exhaustiveness checker mis-flags the
-/// equivalent `match tag { 0x0000 | 0x8000 => …, 0x0001..=0x7FFF
-/// => …, 0x8001..=0xFFFF => … }` form as non-exhaustive (rustc
-/// accepts it, but rust-analyzer surfaces a false-positive E0004).
-/// The ladder is functionally identical and lints clean in both.
+/// The if/else form avoids a previously observed rust-analyzer false-positive
+/// E0004 for the exhaustive `match` over `0x0000 | 0x8000`, `0x0001..=0x7FFF`,
+/// and `0x8001..=0xFFFF`. rustc accepts that match, but the ladder avoids the
+/// editor diagnostic.
 pub(crate) fn classify_tlv_tag(tag: u16) -> Result<TlvClass, CryptoError> {
     if tag == 0x0000 || tag == 0x8000 {
         Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv))

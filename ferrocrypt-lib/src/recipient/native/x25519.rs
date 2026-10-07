@@ -124,8 +124,8 @@ pub(crate) fn is_canonical_public_key_encoding(bytes: &[u8; PUBLIC_KEY_SIZE]) ->
 /// body: an all-zero or non-canonical `ephemeral_public_key_bytes`
 /// rejects the entry with no credential, KDF, or key agreement. The
 /// exact 104-byte length is enforced by the caller via the native
-/// registry. Small-order ephemerals other than all-zero cannot be
-/// screened here and stay covered by [`unwrap`]'s shared-secret check.
+/// registry. Other small-order points are not screened here;
+/// [`unwrap`] rejects them through its all-zero shared-secret check.
 ///
 /// Called from the §3.7 step 8 preflight and again from [`unwrap`], so
 /// the rule holds even for a body that did not come through the
@@ -417,8 +417,10 @@ pub(crate) struct OpenedX25519KeyFile {
 ///   `FORMAT.md` §2.2 byte-length bound
 /// - [`CryptoError::InvalidKdfParams`] for header KDF fields outside
 ///   the structural bounds
-/// - [`CryptoError::KdfResourceCapExceeded`] when the header's
-///   `mem_cost` exceeds `kdf_limit` (or the library default ceiling)
+/// - [`CryptoError::KdfResourceCapExceeded`],
+///   [`CryptoError::KdfTimeCostCapExceeded`],
+///   [`CryptoError::KdfLanesCapExceeded`], or [`CryptoError::KdfWorkCapExceeded`]
+///   when stored costs exceed `kdf_limit` (or the library defaults)
 /// - [`CryptoError::PrivateKeyWrappedSecretCapExceeded`] when the
 ///   header's `wrapped_secret_len` exceeds `key_read_limits`
 /// - [`CryptoError::UnsupportedVersion`] for a key file from an

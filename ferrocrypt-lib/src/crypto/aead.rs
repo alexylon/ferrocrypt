@@ -1,7 +1,7 @@
 //! XChaCha20-Poly1305 single-shot seal/open helpers.
 //!
 //! Used to wrap the per-file `file_key` inside recipient bodies (both
-//! `argon2id` and `x25519`) and inside the `private.key` AEAD. AEAD
+//! `argon2id` and `x25519`) and to seal secret key material in `private.key`. AEAD
 //! nonce sizes for the wrap step live here too so the nonce shape and
 //! the AEAD primitive share a single source of truth.
 
@@ -14,8 +14,7 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 use crate::crypto::keys::{FILE_KEY_SIZE, FileKey};
 
-/// XChaCha20-Poly1305 single-shot nonce size, used for both mode
-/// envelopes (`wrap_nonce`) and the `private.key` AEAD.
+/// XChaCha20-Poly1305 nonce size for recipient bodies and `private.key`.
 pub const WRAP_NONCE_SIZE: usize = 24;
 
 /// Poly1305 authentication tag size in bytes.
@@ -27,8 +26,8 @@ pub const WRAPPED_FILE_KEY_SIZE: usize = FILE_KEY_SIZE + TAG_SIZE;
 
 /// Seals a [`FileKey`] with XChaCha20-Poly1305. Returns the
 /// 48-byte wrapped form (ciphertext + tag) suitable for placement in
-/// a mode envelope. `AAD` is empty — both modes' other fields are
-/// covered by the outer HMAC.
+/// a recipient body. AAD is empty; the containing header MAC authenticates
+/// the recipient fields.
 pub(crate) fn seal_file_key(
     wrap_key: &[u8; 32],
     wrap_nonce: &[u8; WRAP_NONCE_SIZE],
@@ -104,10 +103,8 @@ pub(crate) fn seal_with_aad(
 /// invoked on tag mismatch so the caller can route to the appropriate
 /// typed error (wrong-passphrase, tampered-AAD, wrong-recipient, …).
 ///
-/// The plaintext is wrapped in [`Zeroizing`] **inside** the decrypt
-/// expression so it never lives as a bare `Vec<u8>` on the stack — a
-/// panic between decrypt-success and the wrapper would otherwise free
-/// the allocation without zeroing and leave cleartext in released memory.
+/// Wraps the returned plaintext in [`Zeroizing`] immediately after successful
+/// decryption so the owned allocation is wiped on drop.
 pub(crate) fn open_with_aad(
     wrap_key: &[u8; 32],
     wrap_nonce: &[u8; WRAP_NONCE_SIZE],

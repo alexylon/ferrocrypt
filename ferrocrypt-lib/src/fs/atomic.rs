@@ -1,6 +1,6 @@
 //! Atomic output finalization helpers.
 //!
-//! This module centralizes the path-based "write under a temp name,
+//! This module centralizes the "write under a temporary name,
 //! promote to the final name only on success" pattern used throughout
 //! the crate for encrypted-file output, generated key files, and the
 //! Windows / other-target decrypt-promotion fallback.
@@ -34,7 +34,7 @@
 //! extraction flushes its own files. [`sync_dir_durable`] flushes directory
 //! entries and reports failures; it is key generation's required barrier on
 //! Windows and the other targets. On Linux and macOS that barrier is
-//! [`OutputDir::flush_durable`], which flushes through the handle the key
+//! `OutputDir::flush_durable`, which flushes through the handle the key
 //! files were committed through with `sync_dir_durable_at`, the required
 //! flush the macOS extraction barrier also uses. [`sync_parent_dir`] remains
 //! best-effort for outputs whose loss can be recovered.
@@ -176,11 +176,12 @@ impl FinalizedFile {
 /// confirm where acting would mean removing an entry — never as a
 /// match (`THREAT_MODEL.md` §7.4).
 ///
-/// Every comparison in this crate is between objects that both exist
-/// when it runs — a retained handle, or a link just made, keeps the
-/// recorded one alive — because a filesystem may reuse an identifier once
-/// its object is gone, and two live objects on one volume never share
-/// one. What remains is documented in `SECURITY.md`: ReFS reports a
+/// Commit comparisons retain a handle or link to the recorded object because
+/// filesystems may reuse identifiers after an object is removed. The archive
+/// writer's descendant-source check is an exception: it records metadata
+/// without retaining each file and can miss inode reuse between passes (see
+/// `archive::encode::require_same_source_file`). Other limitations are
+/// documented in `SECURITY.md`: ReFS reports a
 /// 64-bit truncation of a wider identifier, and a filesystem that
 /// assigns one non-zero identifier to every object — some network
 /// redirectors — makes every comparison hold, so these checks detect
@@ -548,9 +549,9 @@ fn sync_parent_dir(_path: &Path) {}
 ///
 /// The promotion is a single atomic no-replace rename wherever the
 /// filesystem supports one: handle-relative through the anchor on Linux
-/// and macOS ([`finalize_file_at`]), by ambient path through `tempfile`
+/// and macOS (`finalize_file_at`), by ambient path through `tempfile`
 /// elsewhere. Where the filesystem supports no such rename (see
-/// [`no_replace_rename_unsupported`]), the Unix fallback commits by
+/// `no_replace_rename_unsupported`), the Unix fallback commits by
 /// linking or, on a filesystem without hard links, by claiming the name
 /// and renaming over the claim ([`crate::fs::commit`]). Every route keeps
 /// the no-clobber guarantee against entries that predate the commit.
@@ -651,7 +652,7 @@ fn finalize_file_at(
 /// committed handle, and the reported-path and single-link confirmations.
 ///
 /// Windows and the other Unix targets only: Linux and macOS commit
-/// through [`finalize_file_at`] instead.
+/// through `finalize_file_at` instead.
 ///
 /// The link count is required even on this arm because `tempfile` retries
 /// a rejected no-replace rename on Unix through a hard link of its own and
@@ -1406,7 +1407,7 @@ fn finalize_file_via_link_or_claim(
     finalize_file_via_link_or_claim_in(tmp, final_path, label, &output_dir)
 }
 
-/// [`finalize_file_via_link_or_claim`] against an already-open anchor.
+/// Commits through the link-or-claim fallback using an already-open anchor.
 // Reached in production only on the Unix targets without a
 // handle-relative commit; elsewhere the tests drive it to exercise
 // the route a filesystem with a working no-replace rename never takes.

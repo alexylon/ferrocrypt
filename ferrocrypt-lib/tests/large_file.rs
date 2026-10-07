@@ -2,15 +2,15 @@
 //!
 //! The STREAM chunk counter is bounded far above this size, so 4 GiB is not
 //! about counter overflow — it is about the `u64` size and byte-total fields
-//! and any `usize`/`u32` cast in size accounting or progress math. No other
-//! test moves more than 3 GiB through real I/O, so a truncation or wrap in a
-//! size field above `u32::MAX` would be invisible. This test encrypts and
+//! and conversions to `usize` or `u32` in size accounting. This test encrypts and
 //! decrypts a file just over 4 GiB with a position-dependent payload (so a
 //! reordered or truncated stream changes the checksum) and asserts the round
 //! trip preserves both the exact length and a streamed content hash.
 //!
 //! Ignored by default (multi-GiB I/O and disk). Run it in a release
-//! qualification lane, on a machine with a few spare GiB of disk:
+//! qualification lane with a little over 8 GiB of free disk for the default
+//! size. The input is deleted before decryption, so peak usage is two copies
+//! plus ciphertext and filesystem overhead:
 //!
 //! ```text
 //! cargo test -p ferrocrypt --release --test large_file -- --ignored --test-threads=1
@@ -78,8 +78,8 @@ fn write_payload(path: &Path, len: u64) {
 }
 
 /// Streams `path`, returning `(length, FNV-1a-64 hash)`. Length plus a
-/// full-content hash detects truncation, extension, and any content change
-/// without holding the file in memory.
+/// full-content hash checks for truncation, extension, and content changes
+/// without holding the file in memory. The hash is not cryptographic.
 fn hash_file(path: &Path) -> (u64, u64) {
     let mut f = File::open(path).expect("open for hashing");
     let mut buf = vec![0u8; CHUNK];

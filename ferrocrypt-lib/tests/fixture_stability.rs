@@ -9,7 +9,7 @@
 //! change has merged) run:
 //!
 //! ```bash
-//! cargo test --package ferrocrypt fixture_stability::regenerate \
+//! cargo test --package ferrocrypt --test fixture_stability regenerate_fixtures \
 //!     -- --ignored --test-threads=1
 //! ```
 //!

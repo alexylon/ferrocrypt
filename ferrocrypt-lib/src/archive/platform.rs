@@ -7,7 +7,8 @@
 //! mount points are rejected alongside std-recognised symlinks. File
 //! creation goes through `OpenOptions::create_new(true)` with
 //! `OpenOptionsFollowExt::follow(FollowSymlinks::No)`. Permissions are
-//! always set on an open handle, never via a re-resolved path.
+//! applied through handles, except Unix `restore_owner_access`, which restores
+//! access by name from a parent handle during failure cleanup.
 //!
 //! Universal across Linux / macOS / Windows. The same code path runs
 //! on every target so the threat model stays uniform — the invariant
@@ -21,8 +22,7 @@
 //!
 //! Internally cap-std and cap-fs-ext layer on `rustix` (Linux/macOS)
 //! and `windows-sys` (Windows). ferrocrypt itself contains no
-//! `unsafe`; all direct syscall surface is in audited Bytecode
-//! Alliance crates.
+//! `unsafe`; these dependencies implement the platform system calls.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -149,7 +149,8 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 
 /// Identity of a filesystem object, read from an open handle so a later
 /// step can tell whether a name still denotes the object this run
-/// created. Rename does not change it, so it survives promotion.
+/// created. The retained handle survives promotion; identity is read after
+/// promotion because some filesystems can renumber objects during rename.
 ///
 /// The pair is the device and inode number on Unix, and the volume
 /// serial number and file index on Windows; both are read through
@@ -243,7 +244,7 @@ pub(crate) fn compare_owners(_dir: &Dir, _file: &File) -> Result<OwnerComparison
 /// lands in the exact directory the contents were written to, and the
 /// kernel still refuses an existing `to` atomically
 /// (`io::ErrorKind::AlreadyExists`). A best-effort directory `fsync`
-/// follows so the rename is durable, mirroring the parent-directory
+/// follows to improve durability, mirroring the parent-directory
 /// sync the path-based `fs::atomic` helpers perform.
 ///
 /// Linux and macOS only. `RENAME_NOREPLACE` maps to `renameat2` on
@@ -332,7 +333,7 @@ impl From<crate::fs::commit::CommitFailure> for PromotionFailure {
 /// wrong file. The path-based file promotion used off Linux and macOS can
 /// commit by hard link the same way — `tempfile`'s own fallback, whose
 /// unlink result it does not report — so it is marked through
-/// [`Self::for_tempfile_file_promotion`].
+/// `Self::for_tempfile_file_promotion`.
 ///
 /// If the staged-name unlink fails, the final name must not be withdrawn by
 /// name: a concurrent writer can replace that entry while the failed unlink
@@ -460,12 +461,10 @@ fn rename_at_no_clobber_via_claim_with(
 /// the directory entries — the links to its child files and
 /// subdirectories — to stable storage.
 ///
-/// The extractor uses this before promoting a directory root, so a
-/// crash after the `.incomplete` → final rename cannot leave the final
-/// output present while nested entries are missing on filesystems where
-/// file `fsync` does not imply directory durability. The promotion path
-/// also uses it after a handle-relative rename to make the rename
-/// durable.
+/// The extractor uses this before promoting a directory root to improve
+/// durability of nested entries where file `fsync` alone is insufficient.
+/// Promotion also uses it after a handle-relative rename. Because failures
+/// are ignored, neither use guarantees crash durability.
 ///
 /// The flush goes through a handle from
 /// [`crate::fs::atomic::reopen_dir_for_flush`], because `dir` itself may
@@ -1024,7 +1023,7 @@ pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()>
 /// permission (`0o311`, for example) would make a later open fail. The
 /// flush then runs after the chmod and covers the new mode as well as
 /// the directory entries, so a staged directory is as durable as a
-/// staged file, whose mode is also applied before its flush. Permission
+/// staged file when the flush succeeds. Permission
 /// is checked when a handle is opened, not when it is used, so the
 /// restrictive mode does not affect the flush.
 ///

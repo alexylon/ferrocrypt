@@ -47,7 +47,7 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
     Ok(())
 }
 
-/// Local policy limit for Argon2id work accepted during decryption.
+/// Resource policy for Argon2id derivation during reading and writing.
 ///
 /// A `.fcr` file or `private.key` stores Argon2id parameters in the cleartext
 /// header. When processing untrusted input, `KdfLimit` prevents a malicious
@@ -60,18 +60,20 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// format maximum and so reject nothing on their own.
 ///
 /// The memory and work caps bound different resources: memory bounds one
-/// derivation's peak allocation, work bounds how long it runs. Neither implies
-/// the other, which is why both are applied.
+/// derivation's Argon2 workspace, while work bounds memory cost multiplied
+/// by iteration count. Work is a cost estimate, not a wall-clock timeout;
+/// runtime and total process memory also depend on the environment.
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
 /// optionally adjust the other dimensions with [`KdfLimit::max_time_cost`],
 /// [`KdfLimit::max_lanes`], or [`KdfLimit::max_work`], then pass the result to
 /// [`crate::PassphraseDecryptor::kdf_limit`] or
-/// [`crate::PrivateKeyDecryptor::kdf_limit`]. Raising memory does not raise the
-/// work budget; a caller who wants 2 GiB at the writer's four passes sets both.
+/// [`crate::PrivateKeyDecryptor::kdf_limit`]. Writers use the same policy via
+/// [`crate::Encryptor::kdf_limit`] and [`crate::KeyPairGenerator::kdf_limit`].
+/// Raising memory does not raise the work budget; accepting 2 GiB at the
+/// writer's four passes requires raising both.
 /// The struct is `#[non_exhaustive]` so future releases can add further limit
-/// dimensions without a breaking change. A cap is a numeric bound, which is
-/// what lets the struct stay `Copy`.
+/// dimensions without a breaking change.
 ///
 /// # Unattended services
 ///
@@ -80,6 +82,9 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// derivation still holds its full memory cost for its whole runtime, so the
 /// exposure that matters is that cost multiplied by concurrency, which no
 /// per-operation cap can bound.
+///
+/// This type remains `Copy`: its resource caps are numeric bounds, including
+/// any caps added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {
@@ -94,17 +99,16 @@ pub struct KdfLimit {
     /// unless tightened with [`KdfLimit::max_lanes`].
     pub(crate) max_lanes: u32,
     /// Maximum accepted combined work: memory cost (KiB) multiplied by time
-    /// cost (passes over that memory). Argon2's own cost model, so it bounds
-    /// runtime without pinning either factor. Defaults to
+    /// cost (passes over that memory). This is a work estimate, not a
+    /// runtime guarantee. Defaults to
     /// [`KdfLimit::WORK_DEFAULT`].
     pub(crate) max_work: u64,
 }
 
 impl KdfLimit {
     /// Structural maximum for Argon2id memory cost (2 GiB in KiB,
-    /// `FORMAT.md` §2.2). A limit at this value accepts every
-    /// structurally valid header, which is what §2.2 asks a reader that
-    /// applies no policy of its own to do.
+    /// `FORMAT.md` §2.2). At this value, the memory cap adds no restriction
+    /// beyond structural validation; the other resource caps still apply.
     pub const MEM_COST_KIB_STRUCTURAL_MAX: u32 = KdfParams::MAX_MEM_COST;
     /// Structural maximum for Argon2id time cost (`FORMAT.md` §2.2).
     pub const TIME_COST_STRUCTURAL_MAX: u32 = KdfParams::MAX_TIME_COST;
@@ -112,15 +116,14 @@ impl KdfLimit {
     pub const LANES_STRUCTURAL_MAX: u32 = KdfParams::MAX_LANES;
     /// Structural maximum for combined Argon2id work: the largest
     /// memory-times-time product `FORMAT.md` §2.2 can express. A limit at
-    /// this value accepts every structurally valid header.
+    /// this value adds no work restriction beyond structural validation.
     pub const WORK_STRUCTURAL_MAX: u64 =
         KdfParams::MAX_MEM_COST as u64 * KdfParams::MAX_TIME_COST as u64;
 
     /// Default value used by [`KdfLimit::default`] for
     /// `max_mem_cost_kib` (1 GiB in KiB). Matches the writer's own
-    /// default memory cost, so a file this library produced always
-    /// decrypts under the default ceiling. The time-cost and lane
-    /// defaults are the structural maxima above.
+    /// default memory cost, so default writer parameters satisfy this cap.
+    /// The time-cost and lane defaults are the structural maxima above.
     pub const MEM_COST_KIB_DEFAULT: u32 = KdfParams::DEFAULT_MEM_COST;
 
     /// Default value used by [`KdfLimit::default`] for `max_work`: the
@@ -176,7 +179,7 @@ impl KdfLimit {
     /// Sets the accepted combined-work cap — memory cost in KiB multiplied by
     /// time cost — clamped at [`Self::WORK_STRUCTURAL_MAX`]. Raise it to accept
     /// a header that is legitimately more expensive than the writer's own
-    /// defaults; lower it to refuse work an ordinary file never requests.
+    /// defaults; lower it to restrict the accepted work further.
     pub fn max_work(mut self, value: u64) -> Self {
         self.max_work = value.min(Self::WORK_STRUCTURAL_MAX);
         self
@@ -219,8 +222,12 @@ impl Default for KdfLimit {
 ///
 /// The struct is deliberately exhaustive with public fields: the field set
 /// mirrors the fixed 12-byte wire encoding ([`KDF_PARAMS_SIZE`]), so a new
-/// parameter would be a wire-format change carried by a new recipient body,
-/// not a field added here.
+/// parameter would require a different wire representation.
+///
+/// The default is 1 GiB of memory, four iterations, and four lanes. Struct
+/// construction and [`Self::to_bytes`] do not validate values. Encryption and
+/// key generation validate them before use; [`Self::from_bytes`] validates
+/// both structural bounds and reader resource policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
     /// Argon2id memory cost in KiB.
@@ -241,8 +248,8 @@ const _: () = assert!(KDF_LANES_OFFSET + size_of::<u32>() == KDF_PARAMS_SIZE);
 
 /// Argon2 spec constraint: `mem_cost` (in KiB) must be at least
 /// `ARGON2_MIN_MEM_COST_PER_LANE * lanes` for the per-lane workspace
-/// to be sized correctly. Values below this floor force Argon2 into
-/// a degraded fallback configuration. Used by [`KdfParams::validate_structural`].
+/// to be sized correctly. Values below this floor are invalid. Used by
+/// [`KdfParams::validate_structural`].
 const ARGON2_MIN_MEM_COST_PER_LANE: u32 = 8;
 
 impl KdfParams {
@@ -250,7 +257,8 @@ impl KdfParams {
     const DEFAULT_TIME_COST: u32 = 4;
     const DEFAULT_LANES: u32 = 4;
 
-    /// Serializes these parameters to the big-endian wire encoding.
+    /// Serializes these parameters to the big-endian wire encoding without
+    /// validating their values.
     pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         write_u32_be(&mut buf, KDF_MEM_COST_OFFSET, self.mem_cost);
@@ -338,7 +346,7 @@ impl KdfParams {
         Self::read_fields(bytes)
     }
 
-    /// Applies the caller-supplied resource caps (memory, time cost, lanes)
+    /// Applies the caller-supplied resource caps (memory, time cost, lanes, work)
     /// on top of structurally valid params. `None` means "no explicit caller
     /// limit", but the library still applies [`KdfLimit::default`] so callers
     /// cannot be silently exposed to attacker-controlled 2 GiB allocations
@@ -347,7 +355,7 @@ impl KdfParams {
     /// work. Work is checked last so a header that also breaks a single
     /// dimension keeps reporting that dimension, which names the one cap a
     /// caller would have to change. `pub(crate)`
-    /// deliberately: pairs with [`from_bytes_structural`] and is not part of
+    /// deliberately: pairs with [`Self::from_bytes_structural`] and is not part of
     /// the stable public API. Both the reader ([`from_bytes`](Self::from_bytes))
     /// and the writer ([`validate_for_write`](Self::validate_for_write)) run
     /// this same gate, so under one `KdfLimit` they accept the same params —
@@ -915,12 +923,9 @@ mod tests {
         }
     }
 
-    /// Writer/reader symmetry across all four caps. Both the writer
-    /// (`validate_for_write`) and the reader (`from_bytes`) run the same
-    /// `enforce_limit`, so under one `KdfLimit` they agree: whatever the
-    /// writer emits the reader accepts, and whatever the writer refuses the
-    /// reader refuses too. A written file is therefore always decryptable
-    /// under the same limit.
+    /// Writer and reader agree on all four resource caps under the same
+    /// `KdfLimit`. These cases meet the writer-only memory floor, so it does
+    /// not introduce a separate rejection.
     #[test]
     fn test_kdf_limit_writer_reader_symmetry() {
         // Format-max time cost and lanes under the default limit, at a memory
@@ -1004,7 +1009,7 @@ mod tests {
         }
     }
 
-    /// M-2 regression: when `limit = None` (the library's "no explicit cap"
+    /// When `limit = None` (the library's "no explicit cap"
     /// convenience), `from_bytes` must still apply the default ceiling so
     /// callers who do not pass a `KdfLimit` are not silently exposed to
     /// 2 GiB allocations from attacker-controlled headers.

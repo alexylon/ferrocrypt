@@ -1,64 +1,54 @@
-//! Order coverage of the frozen wire corpus (`FORMAT.md` §12.3).
+//! Checks the wire corpus's validation-order claims (`FORMAT.md` §12.3).
 //!
-//! Three rows of the §12.3 evidence table claim more than the presence of
-//! cases: that the corpus fixes the order of every two checks of a check list
-//! that report different classes and that one artifact can break together.
-//! The rows cover the `.fcr` checks of §3.1 to §3.3 and of §3.7 up to the first
-//! recipient attempt, the `public.key` checks of §7.1 and §7, and the
-//! `private.key` checks of §8 that each of its two readers makes. Two checks
-//! count only when their order can decide a report: when every artifact that
-//! breaks both also breaks a check between them of the earlier one's class, the
-//! pair of that check and the later one counts instead (§12.3). This module
-//! checks the three claims against the committed corpus, so they stay true as
-//! the corpus grows.
+//! The claims cover `.fcr` parsing through the pre-recipient checks, the
+//! `public.key` reader, and both `private.key` readers. A claimed pair consists
+//! of two checks that report different diagnostic classes and can both fail
+//! for one artifact. Their order must be able to affect the reported class.
+//! If every artifact that fails both checks also fails an intervening check
+//! of the earlier check's class, §12.3 counts that intervening check and the
+//! later check instead: no artifact distinguishes the original pair's order
+//! once the intervening check precedes the later one.
 //!
-//! **The evidence model.** A reader is modelled as an order over the checks of
-//! a list. A rejected case states the class the reader reports for its
-//! artifact, so of the checks the artifact breaks, one of that class comes
-//! first: every broken check of another class follows some broken check of the
-//! expected class. Each case thus yields constraints, and a pair of checks is
-//! fixed when no order that satisfies every constraint puts the later check
-//! first. A reader may make checks made once per recipient entry in one pass,
-//! one entry at a time, front to back or back to front. A list sorts those
-//! checks into groups whose entries a reader meets in one direction, and each
-//! way of giving every group a direction its list allows is a family of
-//! readers. A family the cases rule out entirely is refuted; every other family
-//! must fix every claimed pair. A reader that meets the entries in different
-//! directions for checks of one group is outside this model, so a list puts
-//! checks in one group only where the specification makes them in one pass. A
-//! reader may also make a check that the specification makes once over the
-//! whole recipient list on the entries it has met so far, in a pass of either
-//! direction, and so meet it at the first entry where those entries break it;
-//! a case records where such readers, walking each way, first meet it. The
-//! reader the specification describes must report every stored class.
+//! ## Evidence model
 //!
-//! Each artifact is evaluated check by check, as a reader that made that check
-//! first would see it: a check that reads bytes the file does not hold is not
-//! broken. Checks a credential decides, such as unlocking a `private.key` or
-//! unwrapping a recipient, are evaluated with the corpus credentials, so no
-//! case states by hand which checks it breaks. Such readers may still read an
-//! artifact in different ways, for instance in how far they read it or which
-//! declared end they keep, and each list evaluates the readings it names. Where
-//! readers can disagree on whether a check breaks, the case counts that check
-//! only if it reports the case's class: a reader may report it, but a check of
-//! another class that some readers pass fixes nothing. The `.fcr` list merges
-//! its readings in this way, a check broken under only some of them counting
-//! as one that some readers pass. The key lists evaluate each reading apart, as
-//! a reader reads in one way, and claim for each reading only the pairs that a
-//! reader of it can break together. Within a reading, a check that readers
-//! still judge differently counts in the same way, as does an unlock left
-//! untried because its KDF parameters are outside the §2.2 bounds or ask for
-//! more work than this module spends on one.
+//! Each rejected case constrains the possible check orders: at least one
+//! failing check of the expected class must precede every failing check of
+//! another class. A pair is fixed only if no order satisfying all case
+//! constraints reverses it. The specified reader must also produce every
+//! case's stored class.
 //!
-//! The base run asserts every case, as a reader that declares no capability
-//! does (§12.2). Each combination of the capabilities the cases rest on that
-//! change a check of the list then has a run of its own, which also declares
-//! every capability the cases rest on that changes none: the cases that rest
-//! on any of them are left out, as a reader that declares them leaves them
-//! out, the checks they change are evaluated as such a reader would, and the
-//! pairs that run loses must all involve one of those checks. A capability
-//! that changes no check only leaves out more cases, so each run also stands
-//! for the same combination without it.
+//! Per-recipient checks are grouped by parsing pass. Each group has one
+//! allowed traversal direction, forward or reverse, for a given reader
+//! family. Families refuted by the cases are excluded; every remaining family
+//! must fix every claimed pair. Checks over entries seen so far are evaluated
+//! at the first entry where they fail in each direction. The model does not
+//! cover readers that change traversal direction within a group; checks share
+//! a group only where the specification places them in one pass.
+//!
+//! ## Evaluating artifacts
+//!
+//! Each check is evaluated independently, as though it ran first. Missing
+//! bytes do not establish a failure. Credential-dependent checks use the
+//! corpus credentials rather than manually annotated failures. The lists also
+//! model alternative ways to read lengths and declared boundaries.
+//!
+//! A failure shared by all modeled readings is certain. An uncertain failure
+//! contributes evidence only when it reports the case's expected class;
+//! otherwise it could incorrectly constrain a reader that passes that check.
+//! The `.fcr` list merges alternative readings. The key lists evaluate each
+//! reading separately and claim only pairs that can fail together under that
+//! reading. Unlocks skipped because their KDF parameters are invalid or exceed
+//! this checker's work budget are treated as uncertain too.
+//!
+//! ## Capability coverage
+//!
+//! The base run declares no capabilities and asserts every applicable case
+//! (§12.2). Additional runs cover combinations of capabilities that change
+//! checks, omitting cases conditional on those capabilities being absent.
+//! Each run also declares all capabilities that change no check: these only
+//! remove evidence, so this is the most restrictive case for that combination.
+//! Any pair whose coverage is lost must involve a check changed by the run's
+//! capabilities.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

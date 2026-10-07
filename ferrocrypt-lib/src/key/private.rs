@@ -25,10 +25,10 @@
 //! `wrapped_secret` is `XChaCha20-Poly1305(secret_material)` keyed by
 //! `HKDF-SHA3-256(salt = argon2_salt, ikm = Argon2id(...), info =
 //! "ferrocrypt/v1/private-key/wrap")`, with `nonce = wrap_nonce` and
-//! AAD covering every byte before `wrapped_secret`. Tampering any
-//! cleartext byte fails AEAD authentication and surfaces as
-//! [`CryptoError::KeyFileUnlockFailed`] — wrong passphrase and
-//! cleartext-tamper are indistinguishable at the AEAD layer.
+//! AAD covering every byte before `wrapped_secret`. Changes that pass the
+//! structural and resource checks fail AEAD authentication with
+//! [`CryptoError::KeyFileUnlockFailed`]; at that stage a wrong passphrase and
+//! modified cleartext are indistinguishable.
 
 use crate::passphrase::Passphrase;
 use zeroize::Zeroizing;
@@ -48,8 +48,7 @@ use crate::format::{
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
 /// Private-key encoding version byte (`0x01`) for key-pair suite KPS-1.
-/// Mirrors the suite constant from `KeypairSuite::V1` (crate-internal)
-/// so bumping the keypair suite flows through this constant automatically.
+/// Pinned to KPS-1 even when the current writer moves to another suite.
 pub const PRIVATE_KEY_V1_VERSION: u8 = KeypairSuite::V1.private_key_version();
 
 /// Wire-version byte the current writer emits in `private.key` headers.
@@ -353,7 +352,7 @@ fn validate_private_key_ext_tlv(bytes: &[u8]) -> Result<(), CryptoError> {
 /// for the older / newer arms.
 ///
 /// Symmetric counterpart of
-/// [`crate::key::public::public_key_wire_version_to_suite`]; both route
+/// `key::public::public_key_wire_version_to_suite`; both route
 /// through the same centralised mapper. Adding a future suite only
 /// requires updating the mapper's literal-byte arm in `format.rs`, not
 /// this translation layer.
@@ -464,7 +463,7 @@ pub(crate) fn seal_private_key_unchecked_tlv(
 
 /// Whether `seal_private_key_inner` runs the `ext_bytes` TLV gate.
 /// Production paths use [`Self::Validate`]; the test-only
-/// `seal_private_key_unchecked_tlv` uses [`Self::Skip`].
+/// `seal_private_key_unchecked_tlv` uses `Self::Skip`.
 #[derive(Clone, Copy)]
 enum ExtBytesValidation {
     Validate,
@@ -1053,8 +1052,8 @@ mod tests {
     }
 
     /// Companion of the caps above for the wrapped secret: the writer
-    /// enforces the reader's default cap, so a sealed `private.key`
-    /// always opens under default configuration.
+    /// enforces the reader's default wrapped-secret length cap. KDF policy
+    /// and native key-material validation are separate checks.
     #[test]
     fn seal_rejects_wrapped_secret_above_default_local_cap() {
         let public = [0x22u8; 32];

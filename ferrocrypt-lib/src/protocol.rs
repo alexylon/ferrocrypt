@@ -17,24 +17,20 @@
 //! produce / consume opaque [`RecipientBody`] bytes; only this module
 //! constructs full headers or verifies the header MAC.
 //!
-//! ## Decrypt acceptance order (`FORMAT.md` §3.7)
+//! ## Decryption order (`FORMAT.md` §3.7)
 //!
-//! 1. Read prefix.
-//! 2. Reject bad magic / version / kind / flags / header length.
-//! 3. Read header and header MAC.
-//! 4. Structurally parse header and recipient entries.
-//! 5. Reject reserved flags, then unknown critical recipients across
-//!    the whole list, then native structural defects, then illegal
-//!    mixing.
-//! 6. Apply local resource caps.
-//! 7. Iterate supported recipient slots in declared order.
-//! 8. Verify header MAC with the candidate `FileKey` — final
-//!    acceptance gate per slot.
-//! 9. Validate authenticated TLV bytes only after MAC success.
-//! 10. Derive payload key.
-//! 11. STREAM-decrypt the payload.
-//! 12. Decode the archive with path / resource checks before writes.
-//! 13. Promote staged output only on success.
+//! 1. Read and validate the prefix; apply the header-length cap.
+//! 2. Read the header and MAC, then parse the fixed fields and recipient
+//!    entries under the count and body-length caps.
+//! 3. Reject unknown critical recipients, native structural defects, and
+//!    incompatible recipient combinations; apply the aggregate MAC-work cap.
+//! 4. Try supported slots in order, applying KDF limits before derivation.
+//!    For each successful unwrap, derive subkeys and verify the header MAC.
+//!    Select the first MAC-verified key while continuing supported attempts.
+//! 5. Validate authenticated header TLVs, then decrypt the payload and
+//!    validate the archive manifest before staging extracted content.
+//! 6. Verify the complete payload and archive before promotion, then perform
+//!    post-commit checks before returning the output path.
 //!
 //! No refactor may move TLV interpretation, archive writes, or payload
 //! plaintext release before the relevant authentication step.
@@ -86,8 +82,8 @@ pub(crate) trait RecipientScheme {
     /// Writer-side preflight for scheme-carried parameters, run by
     /// [`encrypt`] on every recipient before any filesystem, archive,
     /// or key work. `argon2id` validates its caller-supplied
-    /// [`crate::KdfParams`] against the same structural bounds,
-    /// production floor, and resource policy the reader applies;
+    /// [`crate::KdfParams`] against shared structural bounds and resource
+    /// policy, plus the writer-only memory floor;
     /// `x25519` carries no such parameters and accepts. Required
     /// rather than defaulted so a future scheme must decide
     /// explicitly.
@@ -167,8 +163,8 @@ pub(crate) const WRITE_EXT_BYTES: &[u8] = b"";
 /// filesystem, archive, or key work. A `.fcr` this function writes is
 /// therefore readable under the limits it was checked against; no
 /// caller can skip the gates. [`crate::Encryptor::write`] runs the same
-/// checks earlier so a misconfiguration fails before recipient key
-/// files are read. After the header is assembled, the header-length
+/// checks earlier at the public API boundary. Public keys have already
+/// been resolved by their constructors. After header assembly, the header-length
 /// and header-MAC-work caps run once more against the sealed bytes —
 /// the backstop that keeps the preflight's computed length from
 /// drifting from what is written. The fixed passphrase byte-length
@@ -301,8 +297,7 @@ fn build_native_entry(
 /// the caller-supplied [`HeaderReadLimits`]. Mirrors the reader-side cap
 /// checks in `container::read_encrypted_header`, but runs before any KDF,
 /// ECDH, or output-file work. Called by [`encrypt`] on every write, and
-/// earlier by [`crate::Encryptor::write`] so a misconfiguration fails
-/// before recipient key files are read.
+/// earlier by [`crate::Encryptor::write`] at the public API boundary.
 ///
 /// Takes a [`NativeRecipientType`] rather than a `(type_name, body_len)`
 /// pair so the type-name / body-length pair is bound by the registry
@@ -504,9 +499,10 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
 /// single-candidate (passphrase) and multi-candidate (X25519) cases —
 /// the passphrase path is just a slot loop of length 1. Visiting every
 /// supported slot, rather than short-circuiting on the first MAC
-/// match, makes wall-clock cost a function of `recipient_count`
-/// (capped by `HeaderReadLimits`) rather than of which slot matched,
-/// per the `FORMAT.md` §3.7 SHOULD-level mitigation.
+/// match, reduces disclosure of the matching slot's position through timing
+/// (`FORMAT.md` §3.7). This is not a constant-time operation: successful
+/// unwraps incur additional subkey derivation and MAC work, and fatal errors
+/// stop processing.
 ///
 /// The credential is taken by value and dropped as soon as the slot loop
 /// ends, so the long-lived secret it holds — a passphrase or a private
@@ -708,15 +704,14 @@ fn failure_for(
 /// Both files are staged and synced before either receives its final name.
 /// `private.key` is committed first, and the output directory is flushed after
 /// each commit. This prevents process interruption from leaving `public.key`
-/// without its matching `private.key`. Where directory flushing is supported,
-/// the same guarantee covers power loss.
+/// without its matching `private.key`. Power-loss ordering also requires the
+/// filesystem and storage device to support and honor directory flushing.
 ///
 /// # Writer/reader lockstep
 ///
 /// The caller-supplied [`crate::KdfParams`] are validated here against
-/// the same structural bounds, production floor, and
-/// [`crate::KdfLimit`] resource policy the reader applies when
-/// unlocking, so a `private.key` this function seals unlocks under the
+/// shared structural bounds and [`crate::KdfLimit`] resource policy, plus
+/// the writer-only memory floor, so a `private.key` sealed here meets the
 /// same policy; no caller can skip the gate. `kdf_limit = None`
 /// applies [`crate::KdfLimit::default`]. The fixed passphrase
 /// byte-length bound is enforced inside the sealing path
@@ -930,7 +925,7 @@ fn generate_key_pair_with_seams(
 ///   removed best-effort. A post-commit failure preserves both committed
 ///   final names rather than manufacturing a public-only pair, and reports
 ///   both files as complete.
-/// - If the final directory flush fails, `public.key` is removed and
+/// - If the final directory flush fails, removal of `public.key` is attempted and
 ///   `private.key` is kept. Removing both without a working directory flush
 ///   could leave only `public.key` after power loss. The error says that the
 ///   private key was kept; it is safe to delete.
@@ -1171,9 +1166,9 @@ fn kept_report(file_name: &str) -> String {
 mod tests {
     //! Forward-compat multi-recipient tests (FORMAT.md §3.4 / §3.5).
     //!
-    //! The single-recipient public encrypt API can't produce
-    //! multi-recipient files, so these tests build the on-disk bytes
-    //! by hand using `container::build_encrypted_header` and exercise
+    //! These tests build headers with unknown or deliberately malformed
+    //! recipients that the public encryption API cannot emit. They use
+    //! `container::build_encrypted_header` and exercise
     //! the decrypt path against the resulting fixtures. They lock in:
     //! list iteration on `x25519`, skip unknown non-critical, reject
     //! unknown critical, reject argon2id mixing before any KDF runs,

@@ -18,17 +18,15 @@ use zeroize::Zeroizing;
 /// for it.
 ///
 /// Wiping covers the buffer this value owns. A copy that existed
-/// before construction — a prompt library's buffer, a `String` the
-/// caller still holds — is outside its reach, so build the
-/// `Passphrase` as early as practical and let the source value drop.
+/// before construction is outside its reach. Move an owned `String` into
+/// [`Passphrase::new`] when possible, and explicitly wipe any separate input
+/// buffers that remain; dropping an ordinary `String` does not wipe it.
 /// The wipe also acts only inside this process: it cannot stop the
 /// operating system from paging the memory to swap or including it in
 /// a crash dump while the value is alive.
 ///
-/// There is no way to derive a second value from one secret. A caller
-/// that needs the same passphrase for two operations reads it from its
-/// source again for each; holding the text in a `String` between them
-/// would leave a copy this type cannot wipe.
+/// Each operation needs its own value. If the caller retains the passphrase
+/// elsewhere for reuse, it is responsible for protecting and wiping that copy.
 #[non_exhaustive]
 pub struct Passphrase(Zeroizing<String>);
 
@@ -37,8 +35,9 @@ impl Passphrase {
     ///
     /// Accepts a `String` or `&str`; passing an owned `String` moves it
     /// into the wiped buffer without an extra copy of the secret. The
-    /// length bound of 1 to 4,096 bytes is checked by the operation
+    /// length bound of 1 to 4,096 UTF-8 bytes is checked by the operation
     /// that uses the passphrase, not here; construction is infallible.
+    /// Whitespace and Unicode are preserved without normalization.
     pub fn new(text: impl Into<String>) -> Self {
         Self(Zeroizing::new(text.into()))
     }

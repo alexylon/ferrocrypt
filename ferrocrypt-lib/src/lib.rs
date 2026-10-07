@@ -1,6 +1,6 @@
 //! # ferrocrypt
 //!
-//! High-level file encryption for files and directories.
+//! Authenticated encryption of files and directories.
 //!
 //! FerroCrypt writes `.fcr` files using one recipient-oriented container:
 //! one random per-file key, one streamed authenticated payload, and one or more
@@ -20,10 +20,15 @@
 //!   structured format, KDF, recipient, authentication, and I/O failures.
 //!
 //! ## Quick start (passphrase recipient)
+//!
+//! These examples assume the input paths exist and the output names are unused.
+//!
 //! ```rust,no_run
 //! use ferrocrypt::{Decryptor, Encryptor, CryptoError, Passphrase};
 //!
 //! # fn run() -> Result<(), CryptoError> {
+//! std::fs::create_dir_all("./out")?;
+//! std::fs::create_dir_all("./restored")?;
 //! // Encrypt
 //! let encrypted = Encryptor::with_passphrase(Passphrase::new("correct horse battery staple"))
 //!     .write("./secrets", "./out", |ev| eprintln!("{ev}"))?;
@@ -52,6 +57,8 @@
 //! };
 //!
 //! # fn run() -> Result<(), CryptoError> {
+//! std::fs::create_dir_all("./out")?;
+//! std::fs::create_dir_all("./restored")?;
 //! // 1) Generate X25519 keypair
 //! let keys = generate_key_pair("./keys", Passphrase::new("my-key-pass"), |ev| eprintln!("{ev}"))?;
 //! println!("Fingerprint: {}", keys.fingerprint);
@@ -118,17 +125,17 @@
 //!
 //! ## Security notes
 //!
-//! - All cryptographic operations depend on a secure OS RNG; ensure the target
-//!   platform provides one.
+//! - Encryption and key generation require a secure OS random-number source.
 //! - Sender authentication is out of scope; public-key encryption identifies who
 //!   can decrypt, not who encrypted.
-//! - Ciphertext integrity is enforced; modification or wrong keys yield
-//!   [`CryptoError`] results rather than corrupted plaintext.
+//! - A successful decrypt requires header and payload authentication. Wrong
+//!   credentials or corrupted ciphertext return [`CryptoError`]; authenticated
+//!   partial plaintext may already have been staged when a later check fails.
 //! - Passphrase and key-pair writing reject Argon2id memory below a fixed
-//!   19 MiB floor with [`CryptoError::KdfBelowWriteFloor`], so a `.fcr` or
-//!   `private.key` cannot be sealed with a weak passphrase work factor by
-//!   accident. The floor applies only when writing; decryption accepts any
-//!   structurally valid file.
+//!   19 MiB floor with [`CryptoError::KdfBelowWriteFloor`]. This prevents
+//!   accidentally choosing a lower memory cost; it does not make a weak
+//!   passphrase strong. The floor applies only when writing; readers accept lower
+//!   memory costs subject to structural validation and their [`KdfLimit`].
 //! - FerroCrypt authenticates each file as written, but it does not detect
 //!   replay or rollback to an older valid `.fcr`; use external versioning or a
 //!   freshness check if that matters.
@@ -136,6 +143,20 @@
 //!   names, tree structure, and per-file sizes. It does not hide the total
 //!   ciphertext length (an approximate plaintext-size signal), recipient count,
 //!   or that the file is a FerroCrypt `.fcr` container.
+//! - Choose output directories and path ancestors that untrusted processes
+//!   cannot modify during an operation. Existing output entries are refused;
+//!   an error after commit can still leave complete output on disk.
+//! - Decryption stages authenticated plaintext under an `.incomplete` name.
+//!   See [`IncompleteOutputPolicy`] for cleanup, retention, and interruption
+//!   behavior. Do not consume staged output as a successfully decrypted file.
+//! - Encryption is not a filesystem snapshot. Prevent concurrent source
+//!   changes or use a snapshot when a point-in-time copy is required.
+//! - Unattended services must configure resource limits and bound concurrent
+//!   operations. The default Argon2id memory budget is 1 GiB per derivation;
+//!   see [`KdfLimit`]. These APIs perform blocking filesystem and cryptographic
+//!   work; asynchronous applications should run them on a blocking worker.
+//! - Public-key checksums do not establish ownership. Verify the recipient's
+//!   fingerprint through a trusted channel before encrypting.
 //! - This crate is **not** third-party audited and is not advertised as
 //!   compliance-certified.
 //!
@@ -154,11 +175,7 @@
 
 use std::path::PathBuf;
 
-/// The version of this crate, captured from `Cargo.toml` at compile time.
-///
-/// Exposed as a single source of truth so dependents — notably the FerroCrypt
-/// desktop app — can show the version that the release process actually bumps,
-/// rather than each crate carrying its own copy that can drift.
+/// The crate version from `Cargo.toml`, captured at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use crate::api::{
@@ -190,8 +207,8 @@ pub use crate::recipient::policy::MixingPolicy;
 /// and the header MAC verifies — see [`AuthenticatedRecipientMode`] on
 /// [`DecryptOutcome`].
 ///
-/// The variants are categorical and carry no data, which is what lets the
-/// enum stay `Copy`.
+/// This enum remains `Copy`: its variants are categorical and carry no data,
+/// including any added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnauthenticatedRecipientMode {
@@ -226,35 +243,28 @@ impl UnauthenticatedRecipientMode {
     }
 }
 
-/// Recipient mode established by a successful authenticated decrypt.
+/// Recipient mode returned after successful authenticated decryption.
 ///
-/// Constructed only inside the decrypt path after a recipient unwraps **and**
-/// the header MAC verifies. Cannot be forged from an
-/// [`UnauthenticatedRecipientMode`]: the wrapping struct has a private field
-/// and a `pub(crate)` constructor, so external callers can match on the
-/// exposed [`AuthenticatedRecipientModeKind`] but cannot manufacture a value
-/// that claims to be authenticated.
+/// Available through [`DecryptOutcome::recipient_mode`]. Only the library can
+/// construct this value; a structural [`UnauthenticatedRecipientMode`] cannot
+/// be converted into one. Use [`Self::kind`] to match on the recipient kind.
+/// This value records a successful operation, not the current contents of a
+/// path or the sender's identity.
 ///
-/// The struct holds only that kind value, which is what lets it stay
-/// `Copy`.
-///
-/// Surfaced on [`DecryptOutcome::recipient_mode`].
+/// This sealed wrapper remains `Copy` because it holds only the categorical
+/// recipient kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthenticatedRecipientMode {
     kind: AuthenticatedRecipientModeKind,
 }
 
-/// Public, forward-compatible discriminant for
-/// [`AuthenticatedRecipientMode`]. The variant carries no authentication
-/// authority on its own — only an [`AuthenticatedRecipientMode`] value does,
-/// and that wrapper is unforgeable outside the crate.
+/// Recipient kind exposed by [`AuthenticatedRecipientMode::kind`].
 ///
-/// `#[non_exhaustive]` keeps the door open for future native recipient kinds
-/// (post-quantum, hardware-backed) without breaking downstream `match`
-/// arms; callers must include a `_` wildcard arm. This is match
-/// ergonomics, not exhaustive matching. Those future kinds are
-/// discriminants carrying no data, which is what lets the enum stay
-/// `Copy`.
+/// This enum alone is not evidence of authentication. Match with a wildcard
+/// arm to allow for additional recipient kinds in future releases.
+///
+/// This enum remains `Copy`: its variants are categorical and carry no data,
+/// including any added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthenticatedRecipientModeKind {
@@ -277,7 +287,7 @@ impl AuthenticatedRecipientMode {
         }
     }
 
-    /// Returns the public discriminant for `match` ergonomics.
+    /// Returns the recipient kind for pattern matching.
     pub const fn kind(&self) -> AuthenticatedRecipientModeKind {
         self.kind
     }
@@ -309,24 +319,20 @@ impl std::fmt::Display for AuthenticatedRecipientMode {
     }
 }
 
-/// Structured progress signal emitted during encrypt, decrypt, and key
-/// generation.
+/// Progress notification for encryption, decryption, or key generation.
 ///
-/// Callers receive a reference to a `ProgressEvent` through the closure
-/// passed to each operation. The enum is `#[non_exhaustive]` so future
-/// phases (per-entry archive progress, byte counters, domain-specific
-/// stages) can be added without a breaking change — match arms in caller
-/// code must include a `_` wildcard. Future variant payloads stay
-/// `Eq`-comparable (progress quantities are integers, never
-/// floating-point), so the derived `PartialEq` / `Eq` are stable. The
-/// enum deliberately does not implement `Copy`: those future payloads
-/// are not closed to `Copy`-compatible data, and an entry path or label
-/// would carry an owned `String`.
+/// Operations invoke the callback synchronously on the calling thread when
+/// they enter a phase. A notification does not guarantee that the phase or
+/// operation will succeed. Keep callbacks brief and avoid panicking; panics
+/// propagate to the caller.
 ///
-/// For quick rendering, `ProgressEvent` implements [`std::fmt::Display`]
-/// with stable user-facing wording. Consumers that want richer UX
-/// (localization, phase-based icons, percent progress once available)
-/// can `match` on the variants.
+/// [`std::fmt::Display`] provides user-facing text. Match on variants for
+/// localization or other custom presentation, including a wildcard arm for
+/// future variants. Events report phases, not byte counts or percentages.
+///
+/// This enum deliberately does not implement `Copy`: future variants may
+/// carry owned data such as entry paths. Payloads remain `Eq`-comparable;
+/// progress quantities use integers rather than floating-point values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressEvent {
@@ -344,9 +350,10 @@ pub enum ProgressEvent {
     /// call. Fires zero times when the `private.key` is malformed and
     /// rejected before any KDF runs. May block for multiple seconds.
     UnlockingPrivateKey,
-    /// Encrypting a payload. Emitted once per encrypt call.
+    /// Payload encryption is about to begin. Emitted once if this phase is reached.
     Encrypting,
-    /// Decrypting a payload. Emitted once per decrypt call.
+    /// Payload decryption is about to begin, after header authentication.
+    /// Emitted once if this phase is reached.
     Decrypting,
     /// Generating an X25519 key pair. Covers the entire generation flow,
     /// including the Argon2id-driven sealing of `private.key`. The library
@@ -373,8 +380,8 @@ pub use crate::key::public::PublicKey;
 
 /// Successful outcome of an [`Encryptor::write`] call.
 ///
-/// Fields added later stay `Eq`-comparable (quantities are integers,
-/// never floating-point), so the derived `Eq` is stable.
+/// Fields added in future releases remain `Eq`-comparable; quantities use
+/// integers rather than floating-point values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EncryptOutcome {
@@ -385,8 +392,8 @@ pub struct EncryptOutcome {
 /// Successful outcome of [`PassphraseDecryptor::decrypt`] or
 /// [`PrivateKeyDecryptor::decrypt`].
 ///
-/// Fields added later stay `Eq`-comparable (quantities are integers,
-/// never floating-point), so the derived `Eq` is stable.
+/// Fields added in future releases remain `Eq`-comparable; quantities use
+/// integers rather than floating-point values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecryptOutcome {
@@ -403,8 +410,8 @@ pub struct DecryptOutcome {
 /// Successful outcome of [`generate_key_pair`] or
 /// [`KeyPairGenerator::write`].
 ///
-/// Fields added later stay `Eq`-comparable (quantities are integers,
-/// never floating-point), so the derived `Eq` is stable.
+/// Fields added in future releases remain `Eq`-comparable; quantities use
+/// integers rather than floating-point values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyGenOutcome {
@@ -412,17 +419,11 @@ pub struct KeyGenOutcome {
     pub private_key_path: PathBuf,
     /// Path to the generated public key file.
     pub public_key_path: PathBuf,
-    /// Canonical `fcr1…` Bech32 recipient string for the generated
-    /// public key — the form to hand to whoever will encrypt to it.
-    ///
-    /// Derived from the key material this call generated, as
-    /// [`Self::fingerprint`] is, so the two always describe one key.
-    /// Reading `public.key` back to obtain the string would not: the
-    /// file can change between the two operations, and a fingerprint
-    /// checked out of band would then say nothing about the string
-    /// that was published.
+    /// Canonical `fcr1…` Bech32 recipient string to share with senders.
+    /// Derived from the generated key material, as [`Self::fingerprint`] is,
+    /// without re-reading the public key file.
     pub recipient_string: String,
-    /// SHA3-256 fingerprint of the public key (64-char hex string).
+    /// SHA3-256 fingerprint of the public key (64 lowercase hexadecimal characters).
     pub fingerprint: String,
 }
 

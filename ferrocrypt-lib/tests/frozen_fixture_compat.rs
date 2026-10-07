@@ -1,13 +1,13 @@
-//! Cross-version backward-read net.
+//! Backward-compatibility checks against frozen release fixtures.
 //!
 //! `tests/fixtures/frozen/<version>/` holds encrypted `.fcr` artefacts, the
 //! key pair that opens them, and their expected plaintext, captured from a
 //! specific released version and **never regenerated**. (`regenerate_fixtures`
 //! rewrites only `tests/fixtures/encrypted/` and `tests/fixtures/keys/`, not
 //! `frozen/`.) This test decrypts each frozen artefact with the current reader
-//! and asserts it still reproduces the original plaintext byte-for-byte, so a
-//! future change that stops reading bytes an older release wrote is caught
-//! here — the "never strand a recipient" guarantee, mechanically enforced.
+//! and asserts it still reproduces the original plaintext byte-for-byte.
+//! This checks backward compatibility for the cases represented by the
+//! fixtures; the wire corpus provides broader conformance coverage.
 //!
 //! To freeze a new version at release time, copy the freshly regenerated
 //! `encrypted/`, `keys/`, and `source/` into `frozen/<version>/` and add its

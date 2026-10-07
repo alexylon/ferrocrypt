@@ -18,8 +18,9 @@ pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 /// [`crate::validate_private_key_file`], which then parse it from
 /// [`PrivateKeyHeader::from_file_bytes`].
 ///
-/// Only what the file's header declares is read, not the format's maximum for
-/// every field, with the wrapped secret clamped at `wrapped_secret_cap`. A file
+/// The read is bounded by the header's declared lengths, with the wrapped
+/// secret clamped at `wrapped_secret_cap`, plus one byte to detect trailing
+/// data. It does not allocate every field's structural maximum. A file
 /// declaring more than the cap is read short on purpose:
 /// [`crate::key::private::open_private_key`] checks the cap in the header
 /// before the file length, so the caller still gets

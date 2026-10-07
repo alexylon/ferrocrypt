@@ -52,8 +52,7 @@ const FUZZ_KEY_PASSPHRASE: &str = "fuzz_key";
 
 /// Argon2id parameters every fuzz artefact is written with: memory at
 /// the writer's floor (the least it will emit) and the cheapest legal
-/// time and lane counts, so an unlock costs the fuzzer as little as the
-/// format allows. The harnesses cap their readers' memory and total
+/// time cost, with four lanes. This keeps valid seeds inexpensive to unlock. The harnesses cap their readers' memory and total
 /// work at that floor, which bounds what a crafted header can demand
 /// per iteration.
 fn fuzz_kdf_params() -> KdfParams {
@@ -171,9 +170,10 @@ fn write_symmetric_decrypt_seeds(fuzz_root: &Path) {
 /// reach the payload region if the harness holds the matching private
 /// key: a harness generating its own key can never be handed a valid
 /// input. Key generation is not deterministic, so this is a stable
-/// artefact like the frozen format fixtures — delete the directory and
-/// rerun to mint a new one, which invalidates the seeds below and
-/// regenerates them in the same pass.
+/// artifact like the frozen format fixtures. To replace it, remove both
+/// `fixtures/hybrid/` and `seeds/fuzz_hybrid_decrypt/` before rerunning.
+/// Replacing only the key pair leaves existing seeds encrypted to the old
+/// key, so validation fails.
 fn fixture_key_pair(fuzz_root: &Path) -> (PathBuf, PathBuf) {
     let dir = fuzz_root.join("fixtures").join("hybrid");
     let private = dir.join("private.key");

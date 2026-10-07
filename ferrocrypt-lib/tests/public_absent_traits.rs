@@ -1,16 +1,12 @@
-//! Compile-time pin: secret-bearing types implement neither `Clone` nor
-//! `Display`.
+//! Checks that `Passphrase` implements neither `Clone` nor `Display`, and
+//! `PrivateKey` does not implement `Clone`.
 //!
-//! `Passphrase` names both absences in its rustdoc as the reason a
-//! passphrase cannot leak through formatting and each operation consumes
-//! a value built for it; `PrivateKey` states the `Clone` absence because
-//! it holds a `Passphrase`. Nothing enforces an absence: the compiler
-//! cannot, and `cargo semver-checks` lints only `copy_impl_added`. So a
-//! later `#[derive(Clone)]`, or a `Display` impl added for a prompt,
-//! would compile, pass the whole suite, and void the guarantee silently.
-//! The `Copy` positions recorded in AGENTS.md need no pin here for the
-//! opposite reason: that lint already covers them. Mirrors
-//! `public_auto_traits.rs`, which pins the traits that must stay.
+//! Ordinary type checking does not reject these accidental trait additions,
+//! and `cargo semver-checks` checks `Copy` additions (`copy_impl_added`), not
+//! these `Clone` or `Display` additions. These assertions therefore enforce
+//! the documented absences. The `Copy` positions need no equivalent test
+//! because that lint covers them. `public_auto_traits.rs` checks the traits
+//! exported types must retain.
 //!
 //! `Probe<T>` answers each question two ways. The inherent method applies
 //! only when `T` satisfies the bound; otherwise the blanket trait method

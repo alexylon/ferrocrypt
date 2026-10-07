@@ -333,7 +333,7 @@ pub(crate) fn derive_passphrase_wrap_key(
     hkdf_expand_sha3_256(Some(argon2_salt), ikm.as_ref(), info)
 }
 
-/// Payload AEAD key + header HMAC key, derived from a successfully
+/// Payload AEAD key and header HMAC key, derived from a generated or
 /// unwrapped [`FileKey`] via [`derive_subkeys`].
 ///
 /// Named-field struct rather than a tuple so callers cannot

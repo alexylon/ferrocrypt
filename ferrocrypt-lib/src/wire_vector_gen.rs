@@ -19,9 +19,10 @@
 //!     -- --ignored --test-threads=1
 //! ```
 //!
-//! Generation runs under a fixed deterministic RNG seed ([`WIRE_SEED`]) via
-//! [`crate::crypto::keys::with_deterministic_rng`], so regenerating without
-//! changing the generator produces byte-identical output and an empty diff.
+//! Each artifact uses a deterministic seed derived from [`WIRE_SEED`] and its
+//! case identifier (see [`case_scope`]). Regeneration is byte-identical when
+//! the generator is unchanged; adding or reordering cases does not change
+//! another case's random draws.
 //!
 //! Corpus revision 1 is frozen at the `v0.3.0` tag, which `FORMAT.md` §12.3
 //! anchors the publication to. From that tag the rows and bytes are

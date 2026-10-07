@@ -22,17 +22,21 @@ use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, RECIPIENT_STRIN
 /// each builder method clamps at the structural maximum for that field,
 /// so a caller cannot request more than the format can represent.
 ///
-/// Caps are enforced before allocation or key derivation, and exceeding
-/// one surfaces as a distinct `*CapExceeded` error rather than as a
-/// malformed-key defect (`FORMAT.md` §7, §8).
+/// The recipient-string cap is checked before Bech32 decoding; file reads
+/// are separately bounded by the format's maximum text length. The private-key
+/// cap bounds the wrapped-secret read and is checked before key derivation.
+/// Exceeding a local cap returns a distinct `*CapExceeded` error; structural
+/// defects can take precedence (`FORMAT.md` §7, §8).
 ///
 /// Pass a value to [`crate::PublicKey::from_key_file_with_limits`],
 /// [`crate::PublicKey::from_recipient_string_with_limits`],
 /// [`crate::PrivateKeyDecryptor::key_read_limits`], or
 /// [`crate::PrivateKey::into_public_key_with_limits`]. The struct is
 /// `#[non_exhaustive]` so future releases can add further caps without a
-/// breaking change. A cap is a numeric bound, which is what lets the
-/// struct stay `Copy`.
+/// breaking change.
+///
+/// This type remains `Copy`: its resource caps are numeric bounds, including
+/// any caps added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyReadLimits {
@@ -66,8 +70,8 @@ impl KeyReadLimits {
     pub const RECIPIENT_STRING_CHARS_DEFAULT: u32 = RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT as u32;
     /// Default value used by [`KeyReadLimits::default`] for
     /// `max_private_key_wrapped_secret_len` (4,096 bytes). Mirrored on
-    /// the writer side, so a sealed `private.key` always opens under the
-    /// default configuration.
+    /// the writer side, so generated keys fit this length cap. KDF limits
+    /// are checked separately.
     pub const PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT: u32 =
         PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT;
 

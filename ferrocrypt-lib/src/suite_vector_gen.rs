@@ -31,9 +31,10 @@
 //! deterministic RNG seed ([`SUITE_SEED`]) via
 //! [`crate::crypto::keys::with_deterministic_rng`], so regenerating without
 //! changing the generator produces byte-identical output and an empty diff.
-//! Adding or editing a fixture therefore shows only that fixture's bytes in
-//! the diff, not a re-randomization of the whole corpus. The committed files
-//! are what independent readers must keep accepting or rejecting.
+//! The generator shares one RNG stream: adding or removing a draw changes
+//! subsequent output. Append new draws after existing ones to preserve earlier
+//! fixtures. The committed files record the expected acceptance and rejection
+//! behavior for this regression suite.
 
 use std::fs;
 use std::path::{Path, PathBuf};

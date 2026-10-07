@@ -34,8 +34,8 @@ use super::reasons::{
 /// everywhere FerroCrypt runs.
 const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 
-/// The 255-byte filename limit shared by the filesystems FerroCrypt
-/// targets (ext4, XFS, APFS, NTFS).
+/// Conservative component-length budget in UTF-8 bytes. Some filesystems
+/// measure names differently; FCA uses this byte limit for portability.
 const FILESYSTEM_NAME_MAX_BYTES: usize = 255;
 
 /// Maximum UTF-8 byte length of a single FCA path component, fixed by the

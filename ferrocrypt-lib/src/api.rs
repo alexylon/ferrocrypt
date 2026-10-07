@@ -1,12 +1,10 @@
-//! Public façade for FerroCrypt's encrypt / decrypt / keygen API.
+//! Public façade for encryption, decryption, and key generation.
 //!
-//! `api.rs` translates stable public types ([`Encryptor`], [`Decryptor`],
+//! This module translates public types ([`Encryptor`], [`Decryptor`],
 //! [`PublicKey`], [`PrivateKey`]) into internal protocol-level calls. It
-//! does not derive keys, build headers, compute MACs, or fire progress
+//! does not derive keys, build headers, compute MACs, or emit progress
 //! events directly; that work lives in [`crate::protocol`] and the
-//! supporting modules. The module boundary is enforced by visibility:
-//! `api.rs` is the only module that surfaces public-API types beyond
-//! the helpers re-exported from [`crate`].
+//! supporting modules.
 //!
 //! ## Recipient model
 //!
@@ -61,9 +59,12 @@ use crate::{
 /// ([`Encryptor::save_as`]) or override archive resource caps
 /// ([`Encryptor::archive_limits`]). Finalize with
 /// [`Encryptor::write`], which streams plaintext through the FCA
-/// archive layer + XChaCha20-Poly1305 STREAM-BE32 directly to disk.
+/// archive layer and XChaCha20-Poly1305 STREAM-BE32 directly to disk.
 ///
 /// # Examples
+///
+/// These examples assume the input paths and `./out` directory exist and
+/// the output names are unused.
 ///
 /// Passphrase:
 ///
@@ -113,21 +114,12 @@ enum EncryptorState {
     Recipients(Vec<PublicKey>),
 }
 
-/// Collects `public_keys` into a `Vec`, stopping as soon as it yields more
-/// recipients than `FORMAT.md` §3.2 can encode.
+/// Collects recipients up to the format's structural count limit.
 ///
-/// The caller's own recipient-count policy is not applied here, because
-/// [`Encryptor::header_read_limits`] can still raise or tighten it after
-/// construction; [`Encryptor::write`] is where that check belongs. What this
-/// bounds is the ceiling no configuration can lift: a list above
-/// [`HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX`] could never produce a
-/// writable file, so reading all of it is wasted memory and time.
-///
-/// At most one item beyond the ceiling is ever pulled — enough to know the
-/// ceiling was passed — so an iterator of any length, including one with no
-/// end, returns here after a bounded amount of work. The reported count is
-/// therefore where collection stopped, not the length of the supplied
-/// iterator, which is deliberately never established.
+/// Reads at most one item beyond the limit, so even an infinite iterator is
+/// rejected without unbounded collection. The error reports the count at
+/// rejection, not the iterator's total length. Caller-configured limits are
+/// checked later by [`Encryptor::write`], after builder options are set.
 fn collect_recipients_within_structural_max(
     public_keys: impl IntoIterator<Item = PublicKey>,
 ) -> Result<Vec<PublicKey>, CryptoError> {
@@ -253,7 +245,9 @@ impl Encryptor {
     /// Sets the encrypted output file path.
     ///
     /// When set, this path is used instead of the default
-    /// `{output_dir}/{stem}.fcr` destination chosen by [`Encryptor::write`].
+    /// destination chosen by [`Encryptor::write`]. Relative paths are resolved
+    /// against the current working directory, not `output_dir`. The parent
+    /// directory must exist, and an occupied destination is rejected.
     pub fn save_as(mut self, path: impl AsRef<Path>) -> Self {
         self.save_as = Some(path.as_ref().to_path_buf());
         self
@@ -289,7 +283,7 @@ impl Encryptor {
     /// time_cost 4, parallelism 4). A `params.mem_cost` below the 19 MiB
     /// production memory floor rejects at [`Encryptor::write`] time with
     /// [`CryptoError::KdfBelowWriteFloor`], so a caller cannot seal a `.fcr`
-    /// with weak Argon2id memory; the floor is hard and has no override.
+    /// below this memory floor. The production API provides no override.
     ///
     /// # Default-decrypt round-trip
     ///
@@ -315,9 +309,10 @@ impl Encryptor {
     /// [`Decryptor::open`] can read every file the default `Encryptor`
     /// produces. This builder raises or tightens those writer-side caps;
     /// the receiving decryptor must be opened via
-    /// [`Decryptor::open_with_limits`] with limits that are at least as
-    /// permissive. Past roughly 750 X25519 recipients the aggregate
-    /// header-MAC budget binds before the recipient count does; see
+    /// [`Decryptor::open_with_limits`] if the resulting header exceeds the
+    /// reader's defaults. Its limits must admit the actual header, not
+    /// necessarily match the writer's configuration. Past roughly 750 X25519
+    /// recipients the aggregate header-MAC budget binds before the count; see
     /// [`Encryptor::with_public_keys`].
     ///
     /// All four axes are checked before encryption work begins:
@@ -359,18 +354,27 @@ impl Encryptor {
 
     /// Encrypts `input` and writes the resulting `.fcr` file.
     ///
-    /// `input` may be a regular file or a directory. Directory inputs are
-    /// encoded as a FerroCrypt Archive (FCA) payload before payload encryption.
-    /// The default destination is `{output_dir}/{stem}.fcr`; use
-    /// [`Encryptor::save_as`] to supply an explicit output file path.
+    /// `input` may be a regular file or a directory; both are encoded as a
+    /// FerroCrypt Archive (FCA) before encryption. Symlinks, reparse points,
+    /// and special files are rejected. Archive paths must satisfy the portable
+    /// FCA naming rules, including UTF-8 names and collision checks.
+    ///
+    /// The default destination is `output_dir` joined with
+    /// [`default_encrypted_filename`]; [`Encryptor::save_as`] overrides it.
+    /// The destination's parent directory must exist. Existing output entries
+    /// are rejected. The source is read in a metadata pass followed by a
+    /// content pass, not as a point-in-time snapshot; prevent concurrent
+    /// changes if snapshot consistency is required.
+    ///
+    /// The callback runs synchronously; see [`ProgressEvent`].
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InputPath`] if `input` does not exist, and
     /// [`CryptoError::InvalidInput`] for an unusable input path, an output
     /// conflict, an unsupported archive entry, an empty or too-long
-    /// passphrase, or a source file or directory that was replaced or removed
-    /// while it was being read. It is also returned when, after the commit,
+    /// passphrase, or a detected source replacement or size change during
+    /// reading. It is also returned when, after the commit,
     /// the output path no longer leads to the file just written. A source
     /// name the FCA path grammar refuses returns
     /// [`CryptoError::UnsafeArchivePath`]. Caps and key-derivation settings
@@ -557,11 +561,11 @@ impl Decryptor {
     /// [`HeaderReadLimits`] for the structural header read instead of
     /// the conservative defaults.
     ///
-    /// Callers handling files whose recipient strings, recipient
+    /// Callers handling files whose recipient bodies, recipient
     /// counts, or header lengths legitimately exceed the defaults
     /// (for example, forward-compatible files with larger future recipient
     /// bodies) should construct a `HeaderReadLimits` via the builder
-    /// methods and pass it here. The same limits are stashed on the
+    /// methods and pass it here. The same limits are stored on the
     /// returned variant so the second header read inside
     /// [`PassphraseDecryptor::decrypt`] / [`PrivateKeyDecryptor::decrypt`]
     /// uses them too — callers do not need to set them twice.
@@ -645,10 +649,11 @@ impl PassphraseDecryptor {
         self
     }
 
-    /// Overrides the default archive resource caps applied during
-    /// extraction. Must match (or exceed) the limits the writer used —
-    /// a file produced with [`Encryptor::archive_limits`] above the
-    /// default cannot be decrypted under [`ArchiveLimits::default`].
+    /// Sets archive resource caps for extraction.
+    ///
+    /// Limits must admit the archive's actual contents. Raising
+    /// [`Encryptor::archive_limits`] does not itself require higher reader
+    /// limits; only archives that exceed the defaults need them here.
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
         self
@@ -689,6 +694,10 @@ impl PassphraseDecryptor {
     /// recovered candidate file key is accepted only after the header MAC
     /// verifies. On success, the decrypted file or directory is promoted
     /// into `output_dir` and returned in [`DecryptOutcome::output_path`].
+    /// The output directory must already exist and have trusted path ancestry.
+    /// The archived root name determines the destination; existing final or
+    /// `.incomplete` entries are rejected. See [`IncompleteOutputPolicy`] for
+    /// cleanup behavior and [`ProgressEvent`] for callback behavior.
     ///
     /// # Errors
     ///
@@ -704,8 +713,8 @@ impl PassphraseDecryptor {
     /// tree shape is illegal returns [`CryptoError::InvalidArchiveTree`].
     /// Returns [`CryptoError::DecryptorModeMismatch`] if the file at the path
     /// is no longer passphrase-sealed: the header is read again here, so a
-    /// path whose contents changed since [`Decryptor::open`] is refused rather
-    /// than decrypted.
+    /// change to a different recipient mode is refused. A replacement file
+    /// with the same mode is processed normally.
     /// Returns [`CryptoError::InvalidFormat`] if the encrypted container or
     /// authenticated payload stream is structurally malformed. Returns
     /// authentication errors such as [`CryptoError::RecipientUnwrapFailed`],
@@ -803,10 +812,11 @@ impl PrivateKeyDecryptor {
         self
     }
 
-    /// Overrides the default archive resource caps applied during
-    /// extraction. Must match (or exceed) the limits the writer used —
-    /// a file produced with [`Encryptor::archive_limits`] above the
-    /// default cannot be decrypted under [`ArchiveLimits::default`].
+    /// Sets archive resource caps for extraction.
+    ///
+    /// Limits must admit the archive's actual contents. Raising
+    /// [`Encryptor::archive_limits`] does not itself require higher reader
+    /// limits; only archives that exceed the defaults need them here.
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
         self
@@ -845,10 +855,16 @@ impl PrivateKeyDecryptor {
     /// `private_key` must reference a FerroCrypt `private.key` file. The
     /// private key is unlocked with the passphrase bound by
     /// [`PrivateKey::from_key_file`], then the decryptor tries the supported
-    /// `x25519` recipient slots until one yields a candidate file key that
-    /// verifies the header MAC. On success, the decrypted file or directory
+    /// `x25519` recipient slots. The first candidate file key that verifies the
+    /// header MAC is selected, but all supported slots are still attempted to
+    /// reduce disclosure of the matching slot's position through timing.
+    /// On success, the decrypted file or directory
     /// is promoted into `output_dir` and returned in
-    /// [`DecryptOutcome::output_path`].
+    /// [`DecryptOutcome::output_path`]. The output directory must already exist
+    /// and have trusted path ancestry. The archived root name determines the
+    /// destination; existing final or `.incomplete` entries are rejected. See
+    /// [`IncompleteOutputPolicy`] for cleanup behavior and [`ProgressEvent`]
+    /// for callback behavior.
     ///
     /// # Errors
     ///
@@ -860,8 +876,8 @@ impl PrivateKeyDecryptor {
     /// tree shape is illegal returns [`CryptoError::InvalidArchiveTree`].
     /// Returns [`CryptoError::DecryptorModeMismatch`] if the file at the path
     /// is no longer public-key-sealed: the header is read again here, so a
-    /// path whose contents changed since [`Decryptor::open`] is refused rather
-    /// than decrypted.
+    /// change to a different recipient mode is refused. A replacement file
+    /// with the same mode is processed normally.
     /// Returns [`CryptoError::InvalidFormat`] if the private key, encrypted
     /// container, or authenticated payload stream is structurally malformed;
     /// returns [`CryptoError::KeyFileUnlockFailed`] if the private key is
@@ -980,10 +996,9 @@ impl PrivateKey {
     /// the same time.
     ///
     /// Applies the library's default [`KdfLimit`] and [`KeyReadLimits`]. Use
-    /// [`PrivateKey::into_public_key_with_limits`] for a key file sealed with
-    /// [`KeyPairGenerator::kdf_limit`] above either default, which this method
-    /// would otherwise refuse to open even though the matching decrypt
-    /// succeeds.
+    /// [`PrivateKey::into_public_key_with_limits`] when the stored KDF costs
+    /// or wrapped-secret length exceed these defaults. Raising the generator's
+    /// limits alone does not require higher reader limits.
     ///
     /// # Errors
     ///
@@ -1143,26 +1158,30 @@ impl KeyPairGenerator {
         self
     }
 
-    /// Generates the X25519 key pair and writes `private.key` +
-    /// `public.key` into `output_dir`.
+    /// Generates an X25519 key pair and writes `private.key` and `public.key`
+    /// into `output_dir`, creating the directory and missing parents if needed.
+    /// Choose a private directory whose path ancestry untrusted processes
+    /// cannot modify. Existing key files are rejected.
     ///
     /// Both files are written and synced before either receives its final
     /// name. `private.key` is committed first, and the output directory is
     /// flushed after each commit. This order prevents process interruption
     /// from leaving a usable `public.key` without its matching `private.key`.
     ///
-    /// On filesystems that support directory flushing, the same guarantee
-    /// covers power loss, and a successful return means the two files and
-    /// their directory entries have reached stable storage. Other filesystems
-    /// depend on their own ordering after power loss.
+    /// A successful return means the supported durability barriers completed.
+    /// Power-loss durability depends on the filesystem and storage device
+    /// honoring those barriers. Filesystems without directory flushing provide
+    /// no such ordering guarantee across power loss.
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty or too
-    /// long, KDF parameters are outside the accepted writer policy, or either
-    /// key file already exists. It is also returned when, after a commit, a
-    /// key file's path no longer leads to the file just written; committed key
-    /// files are kept.
+    /// long or either key file already exists. It is also returned when a
+    /// committed key file's path no longer names the file just written.
+    /// Complete key files may remain; the error describes the resulting state.
+    /// Invalid KDF parameters return [`CryptoError::InvalidKdfParams`],
+    /// memory below the writer floor returns [`CryptoError::KdfBelowWriteFloor`],
+    /// and costs above [`KdfLimit`] return the matching `Kdf*CapExceeded` variant.
     ///
     /// Returns [`CryptoError::Io`] for filesystem failures, including a
     /// directory flush failure or a committed key file that carries more than
@@ -1209,7 +1228,7 @@ impl KeyPairGenerator {
 ///
 /// Writes `private.key` (passphrase-wrapped at rest) and `public.key`
 /// (UTF-8 `fcr1…` recipient string) into `output_dir`. Returns the
-/// final paths plus the SHA3-256 fingerprint of the public key.
+/// final paths, recipient string, and SHA3-256 fingerprint of the public key.
 ///
 /// Thin convenience wrapper around [`KeyPairGenerator`]. Callers that
 /// need to override Argon2id parameters should use the builder directly:
@@ -1256,8 +1275,8 @@ pub fn generate_key_pair(
 ///
 /// Returns `Ok(None)` if the path is a directory or the file does not open with
 /// the 4-byte FerroCrypt magic, an empty file or one shorter than the magic
-/// included. These cases mean "this isn't a FerroCrypt file at all" — callers
-/// route to plaintext encrypt. [`Decryptor::open`] refuses a file without the
+/// included. Callers may use `None` to select encryption; it does not establish
+/// whether the input is plaintext or uses another encryption format. [`Decryptor::open`] refuses a file without the
 /// magic: with [`FormatDefect::Truncated`](crate::FormatDefect::Truncated) when
 /// it is shorter than the 12-byte `.fcr` prefix, and with
 /// [`FormatDefect::BadMagic`](crate::FormatDefect::BadMagic) otherwise. It
@@ -1269,22 +1288,6 @@ pub fn generate_key_pair(
 /// [`UnauthenticatedRecipientMode::Passphrase`], and one or more supported
 /// `x25519` recipients with no `argon2id` recipient map to
 /// [`UnauthenticatedRecipientMode::PublicKey`].
-///
-/// Returns [`CryptoError::InvalidFormat`] when the magic matches but the
-/// prefix or header is malformed (wrong kind, reserved version byte or flags,
-/// oversized `header_len`, malformed recipient entries, etc.), and
-/// [`CryptoError::UnsupportedVersion`] for an outer-container version this
-/// release does not read. The probe therefore enforces the same structural
-/// invariants the decrypt path would, so corrupt or attacker-modified files
-/// surface their specific diagnostic at probe time.
-///
-/// Returns typed recipient-classification errors when the recipient list is
-/// structurally valid but cannot be classified:
-/// [`CryptoError::UnknownCriticalRecipient`] for an unknown critical
-/// recipient, [`CryptoError::IncompatibleRecipients`] for an illegal mix,
-/// [`CryptoError::NoSupportedRecipient`] when no recipient is of a supported
-/// type, and [`CryptoError::InvalidKdfParams`] for a passphrase recipient
-/// whose stored Argon2id parameters are out of range.
 ///
 /// # Errors
 ///
@@ -1313,7 +1316,7 @@ pub fn probe_recipient_mode(
 /// [`HeaderReadLimits`] for the structural header read instead of the
 /// conservative defaults.
 ///
-/// Use this when probing files whose recipient strings, recipient counts,
+/// Use this when probing files whose recipient bodies, recipient counts,
 /// or header lengths legitimately exceed the default local caps (for example,
 /// forward-compatible files with larger future recipient bodies). All other
 /// behavior — directory short-circuit, magic-byte fast path, typed-error
@@ -1393,14 +1396,13 @@ fn open_header_input(path: &Path) -> Result<Option<std::fs::File>, CryptoError> 
 
 /// Returns the default encrypted filename for a given input path.
 ///
-/// The path is inspected on the filesystem, because the rule differs by kind:
+/// The filesystem is inspected because the rule differs by input kind:
 /// a directory keeps its whole name, so `my.photos` maps to `my.photos.fcr`,
 /// while anything else — a regular file, or a path that does not exist — is
 /// reduced to its stem, so `secrets.txt` maps to `secrets.fcr`. An input of
 /// `.` or `..` takes the name of the directory it points at. The answer
-/// therefore describes the path as it is now. [`Encryptor::write`] derives the
-/// name itself and commits without overwriting, so a stale answer here cannot
-/// cost the caller a file.
+/// therefore describes the path as it is now. [`Encryptor::write`] derives its
+/// own default name and rejects an occupied destination.
 ///
 /// # Errors
 ///
@@ -1412,7 +1414,11 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
 }
 
-/// Validates that a file is a well-formed FerroCrypt `private.key` file.
+/// Checks the cleartext structure of a FerroCrypt `private.key` file.
+///
+/// Success does not establish that the secret can be unlocked, that the stored
+/// public key matches it, or that authenticated extensions are valid. Use
+/// [`PrivateKey::into_public_key`] to unlock the key and verify the pair.
 ///
 /// A file that starts with `fcr1`, the start of every recipient string, is
 /// refused first, as a `public.key`, with

@@ -8,8 +8,8 @@
 //! Both writer and reader apply each cap before the allocation, content copy,
 //! or filesystem work that cap bounds — readers during header / manifest
 //! parse, writers progressively during the metadata pass. The same struct is
-//! reused on both sides so a tree the default-configured decryptor would
-//! refuse cannot be encrypted in the first place.
+//! reused on both sides so a writer cannot exceed the archive caps of a
+//! reader using the same configuration.
 
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
@@ -20,8 +20,8 @@ use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
 ///
 /// The defaults suit ordinary files and directory trees. Raise a cap only
 /// for input of a known origin that legitimately exceeds it, and pass the
-/// same value to both sides: an archive written under raised caps needs
-/// matching caps to be read back.
+/// same value to both sides when possible. Reader limits must admit the
+/// archive's actual contents, regardless of the writer's configured ceilings.
 ///
 /// Every cap has a published `*_DEFAULT` constant, so adjusting one cap
 /// relative to the defaults does not mean copying a number out of
@@ -47,8 +47,10 @@ use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
 /// [`crate::PassphraseDecryptor::archive_limits`], or
 /// [`crate::PrivateKeyDecryptor::archive_limits`]. The struct is
 /// `#[non_exhaustive]` so future releases can add further caps without a
-/// breaking change. A cap is a numeric bound, which is what lets the
-/// struct stay `Copy`.
+/// breaking change.
+///
+/// This type remains `Copy`: its resource caps are numeric bounds, including
+/// any caps added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ArchiveLimits {
@@ -132,8 +134,8 @@ impl ArchiveLimits {
 
     /// Sets the maximum path component count for one archive entry. A
     /// deeper path rejects with
-    /// [`CryptoError::ArchivePathDepthCapExceeded`] before filesystem
-    /// traversal.
+    /// [`CryptoError::ArchivePathDepthCapExceeded`] during source validation
+    /// or manifest parsing, before extraction.
     pub fn max_path_depth(mut self, value: u32) -> Self {
         self.max_path_depth = value;
         self
@@ -141,8 +143,8 @@ impl ArchiveLimits {
 
     /// Sets the maximum UTF-8 byte length of one archive path, clamped at
     /// [`Self::PATH_BYTES_STRUCTURAL_MAX`]. A longer path rejects with
-    /// [`CryptoError::ArchivePathBytesCapExceeded`] before the path is
-    /// allocated or converted.
+    /// [`CryptoError::ArchivePathBytesCapExceeded`]. During decoding, the
+    /// declared length is checked before allocating the path string.
     pub fn max_path_bytes(mut self, value: u32) -> Self {
         self.max_path_bytes = value.min(Self::PATH_BYTES_STRUCTURAL_MAX);
         self
@@ -235,7 +237,7 @@ pub(crate) fn enforce_per_entry_caps(
 
 /// Single source of truth for `entry_count > max_entry_count`. Used by
 /// the writer's metadata-pass per-entry check
-/// ([`enforce_per_entry_caps`]), the reader's [`parse_fca_header`]
+/// ([`enforce_per_entry_caps`]), the reader's [`parse_fca_header`](crate::archive::format::parse_fca_header)
 /// header-field check, and the post-parse manifest-tree validator.
 pub(crate) fn enforce_entry_count_cap(
     entry_count: u32,
@@ -258,7 +260,7 @@ pub(super) fn component_count(path: &str) -> usize {
 
 /// Single source of truth for path-depth cap enforcement. Computes the
 /// depth from the FCA UTF-8 path (count of `/`-separated components)
-/// so callers don't reimplement the split. Used by [`validate_fca_path`]
+/// so callers don't reimplement the split. Used by [`validate_fca_path`](crate::archive::path::validate_fca_path)
 /// (path grammar) and [`enforce_per_entry_caps`] (writer metadata pass).
 pub(crate) fn enforce_path_depth_cap(
     path_utf8: &str,
@@ -279,7 +281,7 @@ pub(crate) fn enforce_path_depth_cap(
 /// the writer's [`crate::archive::format::checked_manifest_len`] (with
 /// the entry path), the reader's
 /// [`crate::archive::format::parse_manifest_bytes`] pre-allocation
-/// guard (without a path yet), and [`validate_fca_path`] (after the
+/// guard (without a path yet), and [`validate_fca_path`](crate::archive::path::validate_fca_path) (after the
 /// path string has been resolved).
 pub(crate) fn enforce_path_bytes_cap(
     path_len: u32,
@@ -293,7 +295,7 @@ pub(crate) fn enforce_path_bytes_cap(
 }
 
 /// Single source of truth for `manifest_len > max_manifest_bytes`. Used
-/// by the reader's [`parse_fca_header`] (header field check) and the
+/// by the reader's [`parse_fca_header`](crate::archive::format::parse_fca_header) (header field check) and the
 /// writer's [`crate::archive::format::checked_manifest_len`] running
 /// total. Takes `u64` so a `u32` wire field and a `usize` running total
 /// both fit.
@@ -311,7 +313,7 @@ pub(crate) fn enforce_manifest_len_cap(
 }
 
 /// Single source of truth for `archive_ext_len > max_archive_ext_bytes`.
-/// Used by [`parse_fca_header`] (only call site today; native writers emit
+/// Used by [`parse_fca_header`](crate::archive::format::parse_fca_header) (only call site today; native writers emit
 /// `archive_ext_len = 0` so the writer-side check is implicit, but a
 /// future writer that emits a non-zero region would call this).
 pub(crate) fn enforce_archive_ext_cap(
@@ -328,7 +330,7 @@ pub(crate) fn enforce_archive_ext_cap(
 }
 
 /// One-shot total-bytes cap check (no running mutator). Used by the
-/// reader's [`parse_fca_header`] (header field), reader's
+/// reader's [`parse_fca_header`](crate::archive::format::parse_fca_header) (header field), reader's
 /// [`crate::archive::format::parse_manifest_bytes`] post-sum
 /// re-validation, and the manifest-tree validator. The writer's
 /// metadata pass uses [`enforce_total_bytes_cap`] (running mutator)

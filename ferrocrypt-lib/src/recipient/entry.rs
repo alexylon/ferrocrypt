@@ -42,8 +42,9 @@ pub(crate) const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
 /// Recipient body bytes plus their declared scheme `type_name`. The
 /// type produced by [`crate::protocol::RecipientScheme::wrap_file_key`]
-/// and consumed by [`crate::protocol::DecryptionCredential::unwrap_file_key`]
-/// — schemes never construct or parse full recipient entries; that is
+/// during encryption. Decryption passes only the body bytes to
+/// [`crate::protocol::DecryptionCredential::unwrap_file_key`]. Schemes do not
+/// construct or parse full recipient entries; that is
 /// `protocol.rs`'s responsibility.
 #[derive(Debug, Clone)]
 pub(crate) struct RecipientBody {
@@ -75,9 +76,9 @@ impl RecipientEntry {
     /// [`crate::recipient::native::x25519::wrap`]).
     ///
     /// The `type_name` is taken from the `NativeRecipientType` so
-    /// callers cannot accidentally construct an entry with a typo'd
-    /// or off-spec name. The body length is checked against the
-    /// type's expected `body_len()`. Native entries default to
+    /// callers cannot construct an entry with a misspelled or invalid name.
+    /// The body length is checked against the type's expected `body_len()`.
+    /// Native entries default to
     /// `recipient_flags = 0` (non-critical); critical bit is reserved
     /// for plugin / opt-in semantics that native types do not use.
     pub fn native(ty: NativeRecipientType, body: Vec<u8>) -> Result<Self, CryptoError> {

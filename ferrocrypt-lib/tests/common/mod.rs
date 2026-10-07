@@ -1,11 +1,10 @@
-//! Test support helpers for `integration_tests.rs`.
+//! Shared integration-test helpers.
 //!
-//! `passphrase_auto` and `recipient_auto` wrap the public [`Encryptor`] /
-//! [`Decryptor`] API with magic-byte direction detection (via
-//! `probe_recipient_mode`: encrypt if the input is plaintext, decrypt if it
-//! starts with the FerroCrypt magic) and inject the test-fast Argon2id
-//! parameters from `ferrocrypt-test-support` so the test suite doesn't burn
-//! seconds per derivation. `generate_key_pair` is the matching keygen wrapper.
+//! `passphrase_auto` and `recipient_auto` use `probe_recipient_mode` to select
+//! encryption or decryption. A recognized encrypted header selects decryption;
+//! `None` selects encryption, and a malformed encrypted header propagates an
+//! error. The helpers use the fast test Argon2id parameters from
+//! `ferrocrypt-test-support`; `generate_key_pair` uses the same configuration.
 //!
 //! Each integration-test binary compiles this module separately; when a
 //! binary only imports a subset of the helpers the rest would trip

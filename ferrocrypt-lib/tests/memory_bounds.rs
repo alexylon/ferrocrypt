@@ -5,9 +5,9 @@
 //! legitimately allocates its whole memory cost — stays off the measured path.
 //! The encryptor reuses one fixed chunk buffer, so a streaming run allocates a
 //! near-constant amount regardless of file size. Total bytes allocated far
-//! below the file size proves the payload streams in fixed-size chunks; a
-//! regression that buffered the whole file would allocate at least the file
-//! size and trip the bound.
+//! below the file size rules out a heap buffer holding the entire input for
+//! this run. Such a regression would allocate at least the file size and
+//! exceed the bound.
 
 use std::alloc::System;
 use std::fs::{self, File};

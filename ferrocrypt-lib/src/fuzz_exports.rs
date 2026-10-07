@@ -34,13 +34,10 @@ pub use crate::fs::paths::INCOMPLETE_SUFFIX;
 pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 
-/// Drives the generic `private.key` load + unlock over attacker-controlled
-/// bytes with a fixed passphrase and a tight 64 KiB Argon2id memory cap. This
-/// reaches past the shape gate that [`validate_private_key_shape`] stops at:
-/// the KDF resource cap, the wrapped-secret cap, the total-length check,
-/// type-name grammar, and AEAD-AAD unlock. Any file demanding more than
-/// 64 KiB of KDF memory is rejected before Argon2id runs, so every iteration
-/// stays cheap.
+/// Exercises generic `private.key` parsing and unlocking with a fixed
+/// passphrase and a 64 KiB Argon2id memory cap. Unlike structural validation
+/// alone, this path also applies KDF policy and attempts AEAD authentication.
+/// The cap limits the KDF workspace, not total process memory or elapsed time.
 pub fn open_private_key_for_fuzz(bytes: &[u8]) -> Result<(), crate::CryptoError> {
     let passphrase = crate::passphrase::Passphrase::new("fuzz-passphrase");
     let limit = crate::KdfLimit::new(64);

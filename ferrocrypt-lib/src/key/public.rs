@@ -52,8 +52,7 @@ use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 pub const PUBLIC_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.public_key_version();
 
 /// Public-key encoding version byte (`0x01`) for key-pair suite KPS-1.
-/// Mirrors the suite constant from `KeypairSuite::V1` (crate-internal)
-/// so bumping the keypair suite flows through this constant automatically.
+/// Pinned to KPS-1 even when the current writer moves to another suite.
 pub const PUBLIC_KEY_V1_VERSION: u8 = KeypairSuite::V1.public_key_version();
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -90,8 +89,8 @@ const fn recipient_hrp_text() -> &'static str {
 }
 
 /// Domain separator for the internal SHA3-256 recipient-payload
-/// checksum. Distinct from any other hash input in the format so a future
-/// extension cannot accidentally collide with this digest.
+/// checksum. This prefix separates checksum inputs from other hash uses in
+/// the format; it does not eliminate cryptographic collision probability.
 pub(crate) const PUBLIC_KEY_CHECKSUM_DOMAIN: &[u8] = b"ferrocrypt/v1/public-key/checksum";
 
 /// Truncated SHA3-256 checksum size in the typed payload, in bytes.
@@ -360,8 +359,9 @@ pub(crate) fn recipient_groups_for_tests(payload: &[u8]) -> Vec<u8> {
 
 /// Test-only: the two non-canonical forms of the 5-bit groups that encode
 /// `payload`, which `FORMAT.md` §7 requires decoders to reject: a padding bit
-/// set in the last group, and a surplus zero group. Neither checksum covers
-/// the padding, so the canonical-padding rule alone rejects them — but only
+/// set in the last group, and a surplus zero group. The encoder recomputes the
+/// Bech32 checksum; the internal checksum covers decoded payload bytes only.
+/// The canonical-padding rule therefore rejects these fixtures — but only
 /// while the padding is one or two bits. With none there is no bit to set,
 /// and with three or more the surplus group completes another byte, which a
 /// decoder reads as payload. Panics otherwise. Never reachable from
@@ -868,11 +868,11 @@ pub(crate) fn read_public_key(
 ///   [`PublicKey::to_recipient_string`];
 /// - fingerprinted with [`PublicKey::fingerprint`].
 ///
-/// The struct is `#[non_exhaustive]` so future sources (key servers,
-/// hardware-backed keys) can be added without a breaking change. It is
-/// `Clone` but not `Copy`: a future recipient type may carry key material
-/// that is not itself `Copy`, and dropping a `Copy` impl after release is a
-/// breaking change.
+/// Cloning retains the resolved key material and suite; it does not read the
+/// source again. Checksums validate the encoding, not the key owner's identity.
+///
+/// This type implements `Clone` but deliberately not `Copy`: future recipient
+/// types may hold key material that is not `Copy`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PublicKey {
@@ -915,8 +915,7 @@ impl PublicKey {
         Self::from_key_file_with_limits(path, KeyReadLimits::default())
     }
 
-    /// Reads a FerroCrypt `public.key` file whose recipient string
-    /// legitimately exceeds the default local cap.
+    /// Reads a FerroCrypt `public.key` file under caller-supplied limits.
     ///
     /// Same single read as [`PublicKey::from_key_file`], with `limits`
     /// applied to the parse.
@@ -934,16 +933,11 @@ impl PublicKey {
 
     /// Wraps raw 32-byte X25519 public-key material directly.
     ///
-    /// The resulting `PublicKey` is tagged with this build's writer
-    /// keypair suite (`WRITER_KEYPAIR_SUITE`, crate-internal). Raw
-    /// bytes carry no suite marker, so this constructor cannot represent a
-    /// public key from a different suite. A future release that drops support
-    /// for an older suite will tag every `from_x25519_bytes` value with the current
-    /// writer suite, ensuring the matching private-key suite is also still
-    /// supported. Callers who need to load a non-writer-suite public key must
-    /// go through [`PublicKey::from_recipient_string`] or
-    /// [`PublicKey::from_key_file`], where the wire-version byte selects the
-    /// suite explicitly.
+    /// Assigns the current writer's key-pair suite. Raw bytes carry no suite
+    /// marker; use [`PublicKey::from_recipient_string`] or
+    /// [`PublicKey::from_key_file`] when loading an existing encoded key so its
+    /// suite is preserved. This constructor cannot verify that a separately
+    /// stored private key belongs to a supported suite.
     ///
     /// Rejects the all-zero point and any non-canonical encoding
     /// structurally. Per `FORMAT.md` §2.4 the accepted material is a
@@ -958,7 +952,7 @@ impl PublicKey {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidFormat`] with
-    /// [`FormatDefect::MalformedPublicKey`](crate::FormatDefect::MalformedPublicKey)
+    /// [`FormatDefect::MalformedPublicKey`]
     /// if `bytes` is the all-zero X25519 public key or a non-canonical
     /// encoding.
     pub fn from_x25519_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
@@ -1004,8 +998,7 @@ impl PublicKey {
         Self::from_recipient_string_with_limits(recipient, KeyReadLimits::default())
     }
 
-    /// Decodes a recipient string that legitimately exceeds the default
-    /// local length cap.
+    /// Decodes a recipient string under caller-supplied length limits.
     ///
     /// Same validation as [`PublicKey::from_recipient_string`], with the
     /// recipient-string cap taken from `limits`.
@@ -1025,10 +1018,10 @@ impl PublicKey {
     ///
     /// Returns 64 lowercase hexadecimal characters: SHA3-256 over
     /// `type_name || 0x00 || key_material`, using the `"x25519"` type
-    /// name. The `type_name` prefix and length-separator byte
-    /// domain-separate the fingerprint by recipient kind, so future
-    /// native types (post-quantum, hybrid KEMs) cannot collide with this
-    /// namespace. Matches the `ferrocrypt fingerprint` subcommand.
+    /// name. The type name and zero-byte delimiter distinguish hash inputs
+    /// for different recipient types. Matches the `ferrocrypt fingerprint`
+    /// subcommand. Verify this fingerprint through a trusted channel to
+    /// establish the recipient's identity.
     ///
     /// # Errors
     ///

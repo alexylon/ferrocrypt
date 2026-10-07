@@ -365,11 +365,9 @@ impl<R: Read> DecryptReader<R> {
     /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds
     /// the reader first rejects an empty final chunk if any non-final chunk
     /// preceded it, then probes the inner reader for one additional byte.
-    /// With the peek-ahead model the probe can only fire if the inner reader
-    /// returned `Ok(0)` and then later produced more bytes — a
-    /// pathological case (non-blocking sockets, mis-implemented
-    /// `Take`-style wrappers). Kept as defense-in-depth so any such
-    /// reader still surfaces [`StreamError::ExtraData`] →
+    /// With the lookahead model, this detects a reader that returns `Ok(0)`
+    /// and subsequently produces more data, such as a file that grows during
+    /// reading. Such input surfaces [`StreamError::ExtraData`] →
     /// [`CryptoError::ExtraDataAfterPayload`].
     fn fill_buffer(&mut self) -> io::Result<()> {
         // Route every refill error through one terminal cleanup path.

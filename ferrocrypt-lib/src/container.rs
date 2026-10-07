@@ -30,8 +30,9 @@
 //!   *after* MAC verification (so the validator can trust authenticated
 //!   bytes). Callers invoke `crypto::tlv::validate_tlv` on `ext_bytes` after
 //!   `format::verify_header_mac` succeeds.
-//! - It does not enforce recipient-mixing policy, classify modes, or run
-//!   recipient unwrap. Those concerns live in `recipient/policy.rs`.
+//! - Recipient-mixing policy and classification live in `recipient/policy.rs`.
+//!   Recipient unwrapping lives in `recipient/native`, coordinated by
+//!   `protocol.rs`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,10 @@ use crate::recipient::{self, RecipientEntry};
 /// output path.
 const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 
-/// Local resource caps applied while reading an encrypted-file header.
+/// Resource caps for encrypted-file headers.
+///
+/// Used by header readers and [`crate::Encryptor::header_read_limits`] to
+/// enforce the same limits before writing.
 ///
 /// The defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every
 /// reader path. Callers may raise individual caps for trusted input
@@ -76,8 +80,10 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// `*CapExceeded` error rather than as a generic format defect.
 ///
 /// The struct is `#[non_exhaustive]` so future releases can add further
-/// caps without a breaking change. A cap is a numeric bound, which is
-/// what lets the struct stay `Copy`.
+/// caps without a breaking change.
+///
+/// This type remains `Copy`: its resource caps are numeric bounds, including
+/// any caps added in future releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeaderReadLimits {
@@ -183,13 +189,11 @@ impl HeaderReadLimits {
     ///
     /// Every candidate recipient that unwraps a file key verifies the
     /// header MAC over the whole `prefix || header`, so a file's
-    /// verification cost is the product of its recipient count and its
-    /// header size, not the sum. Raising
-    /// [`max_recipient_count`](Self::max_recipient_count) or
-    /// [`max_header_len`](Self::max_header_len) therefore raises that
-    /// cost quadratically; this cap is what keeps the product bounded,
-    /// and callers who legitimately need larger files raise it
-    /// deliberately rather than by accident.
+    /// worst-case MAC input is the supported-recipient count multiplied by
+    /// `prefix || header` length. Increasing either factor increases this
+    /// product linearly when the other is fixed; increasing both can produce
+    /// quadratic growth. This cap bounds the product independently of the
+    /// individual count and length limits.
     pub fn max_header_mac_work_bytes(mut self, value: u64) -> Self {
         self.max_header_mac_work_bytes = value.min(Self::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX);
         self
@@ -197,9 +201,8 @@ impl HeaderReadLimits {
 
     /// Single source of truth for the `header_len` cap check. Used by
     /// the reader's `read_encrypted_header` against the header declared
-    /// in the prefix; available to writer-side preflight when a future
-    /// large-header recipient list could exceed
-    /// [`Self::HEADER_LEN_DEFAULT`].
+    /// in the prefix and by writer-side preflight against the calculated
+    /// header length.
     pub(crate) fn enforce_header_len(&self, header_len: u32) -> Result<(), CryptoError> {
         if header_len > self.max_header_len {
             return Err(CryptoError::HeaderLenCapExceeded {
@@ -305,7 +308,7 @@ pub(crate) struct ParsedEncryptedHeader {
     /// Parsed recipient entries, in declared order. Length matches
     /// `fixed.recipient_count`.
     pub recipient_entries: Vec<RecipientEntry>,
-    /// Authenticated extension TLV region. Caller must run
+    /// Unverified extension TLV bytes covered by the header MAC. Caller must run
     /// `crypto::tlv::validate_tlv` on this after MAC verification.
     pub ext_bytes: Vec<u8>,
     /// On-disk header MAC tag. Caller must verify against
@@ -331,12 +334,8 @@ impl ParsedEncryptedHeader {
 /// The caller writes these three byte regions in order, then streams the
 /// encrypted payload after `header_mac` using `payload_key` + `stream_nonce`.
 ///
-/// `payload_key` and `stream_nonce` are bundled in (rather than threaded
-/// through a separate channel) so a caller cannot accidentally pair the
-/// header with subkeys derived from a different `file_key`/`stream_nonce`:
-/// the only constructor is [`build_encrypted_header`], which derives the
-/// MAC from the same `header_key` and binds `payload_key`/`stream_nonce`
-/// to the returned header in one move.
+/// The payload key and nonce travel with the serialized header. Callers of
+/// [`build_encrypted_header`] must supply matching derivation inputs.
 pub(crate) struct BuiltEncryptedHeader {
     pub prefix_bytes: [u8; PREFIX_SIZE],
     pub header_bytes: Vec<u8>,
@@ -404,8 +403,8 @@ impl std::fmt::Debug for ParsedEncryptedHeader {
 /// `reader`. Stops after the MAC tag — the caller streams the payload
 /// from the same reader afterwards.
 ///
-/// Performs zero cryptographic work. All cap rejections fire before any
-/// large allocation is committed:
+/// Performs no cryptographic work. Each cap is checked before the allocation
+/// it bounds; the full header buffer precedes the per-entry checks:
 ///
 /// 1. read the 12-byte prefix, reporting a shorter input as
 ///    [`FormatDefect::Truncated`] before its magic is checked, then
@@ -503,7 +502,9 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// On success returns a [`BuiltEncryptedHeader`] holding the three byte
 /// regions to write in order (prefix, header, MAC) plus `stream_nonce`
 /// and `payload_key` for the payload streamer. Bundling these together
-/// makes a (header, payload_key, stream_nonce) mismatch unrepresentable.
+/// keeps the header and payload material together. Both subkeys must have been
+/// derived from the same file key and the supplied nonce; this function cannot
+/// verify their relationship.
 ///
 /// The combined header length is checked against the 16 MiB structural
 /// maximum before the recipient buffer is allocated. Oversized recipient
@@ -609,21 +610,21 @@ pub(crate) fn resolve_encrypted_output_path(
 ///
 /// On-disk byte order: `prefix(12) || header(31 + entries + ext) || mac(32)
 /// || payload(STREAM)`. The header bytes, MAC, payload key, and stream
-/// nonce all live in `built` so that they cannot be paired with material
-/// from a different `file_key`/`stream_nonce`. The payload is
+/// nonce are taken from `built`. The payload is
 /// XChaCha20-Poly1305 STREAM-BE32 keyed by `built.payload_key` over the
 /// archive captured in `prepared`. No plaintext intermediate files touch
-/// disk: the FCA stream is piped directly through [`EncryptWriter`].
+/// disk: the FCA stream passes directly through
+/// [`EncryptWriter`](crate::crypto::stream::EncryptWriter).
 ///
 /// Accepting [`archive::PreparedArchive`] ensures that source metadata was
 /// collected before this function creates the ciphertext staging file. An
 /// output path inside the input tree therefore cannot add the staging file to
 /// the archive.
 ///
-/// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
-/// tempfile in the destination's parent directory, then renamed via
-/// [`atomic::finalize_file`] only after [`atomic::sync_file_durable`]
-/// has flushed it to stable storage. A pre-existing
+/// The file is staged under a `.ferrocrypt-*.incomplete` name in the
+/// destination's parent directory, then committed without overwriting via
+/// [`atomic::finalize_file`] after [`atomic::sync_file_durable`] completes
+/// the available file durability barrier. A pre-existing
 /// output path rejects with `CryptoError::InvalidInput` before any
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.

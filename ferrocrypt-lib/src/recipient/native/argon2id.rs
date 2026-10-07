@@ -17,8 +17,7 @@
 //!
 //! `argon2id` is **exclusive**: a file containing an `argon2id` entry
 //! must contain exactly one recipient entry. The mixing-rule
-//! enforcement is a header-level concern and lives in the recipient
-//! list parser, not here.
+//! enforcement lives in [`crate::recipient::policy`].
 
 use crate::passphrase::Passphrase;
 
@@ -112,7 +111,7 @@ pub(crate) fn wrap(
 
 /// Opens an `argon2id` recipient body and recovers a candidate
 /// `file_key`. Caller-supplied `kdf_limit` caps memory cost, time cost,
-/// and lanes for untrusted input; KDF parameter structural bounds are
+/// lanes, and combined work for untrusted input; KDF parameter structural bounds are
 /// validated **before** Argon2id runs so a malicious file cannot force
 /// unbounded work.
 ///

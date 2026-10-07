@@ -76,7 +76,8 @@ pub struct ArchiveEntry {
 /// or content streaming (writer).
 #[derive(Debug, Clone)]
 pub struct Manifest {
-    /// Manifest entries in writer-canonical order.
+    /// Manifest entries in content-stream order. Writers sort canonically;
+    /// readers preserve the stored order, which need not be canonical.
     pub entries: Vec<ArchiveEntry>,
     /// Sum of `size` across every file entry; matches the header's
     /// `total_file_bytes` after parse-time validation.
@@ -84,7 +85,7 @@ pub struct Manifest {
     /// Top-level component shared by every entry's `path_utf8`.
     pub root_name: OsString,
     /// `true` when the manifest's single entry is a regular file at the
-    /// root; `false` for directory roots with one or more children.
+    /// root; `false` for directory roots, including empty directories.
     pub root_is_file: bool,
     /// Cached `mode` of the root entry. Captured during
     /// `validate_manifest_tree` so the directory-mode apply step does

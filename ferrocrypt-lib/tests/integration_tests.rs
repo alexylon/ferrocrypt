@@ -242,20 +242,10 @@ fn test_passphrase_wrong_password() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Appending bytes to a finished `.fcr` file must fail closed at the
-/// public API level. STREAM-BE32's per-chunk nonce binding rejects the
-/// append as a tampered final chunk, so the user-visible variant is
-/// `PayloadTampered`. The dedicated `ExtraDataAfterPayload` variant
-/// covers the orthogonal "pathological reader signals EOF then yields
-/// more bytes" case, which is unreachable through a path-based API
-/// (`File`'s `Read` impl does not violate the trait contract that way)
-/// — that branch is exercised by `streaming_aead_extra_data_after_final_chunk_rejected`
-/// in `common.rs::tests` via a custom `Read` wrapper, and the
-/// `From<io::Error>` mapping is locked in by
-/// `stream_error_markers_map_to_typed_variants` in `error.rs::tests`.
-/// Together these three tests form the regression coverage for the
-/// trailing-data probe wiring; this integration test pins the
-/// realistic file-with-appended-bytes shape through the public API.
+/// Appending bytes to a completed `.fcr` file must return `PayloadTampered`:
+/// the changed final chunk fails authentication. The distinct case of a
+/// reader yielding bytes after an earlier EOF returns `ExtraDataAfterPayload`
+/// and is exercised by a custom reader in `crypto::stream` unit tests.
 #[test]
 fn test_passphrase_appended_bytes_fail_closed_at_public_api() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("passphrase_appended_bytes");
@@ -527,11 +517,8 @@ fn test_recipient_keygen_rejects_empty_passphrase() {
     );
 }
 
-/// M-3 regression: `PrivateKeyDecryptor::decrypt` must reject an empty
-/// passphrase at the top of the function, before `open_x25519_private_key`
-/// and any KDF work runs. Pre-restructure the hybrid path was a
-/// consistency gap that let an empty passphrase burn an Argon2id cycle
-/// on the private-key file before failing.
+/// Private-key decryption rejects an empty passphrase before opening or
+/// deriving a key from the private-key file.
 #[test]
 fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     use ferrocrypt::{Decryptor, Encryptor, PrivateKey, ProgressEvent, PublicKey};
@@ -591,12 +578,8 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     );
 }
 
-/// M-4 regression: `Encryptor::write` must reject a symlink input with
-/// a typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit
-/// the rejection happened inside `archive::archive`, which runs after
-/// the KDF — an accidental symlink cost the user seconds and up to 1 GiB
-/// of RAM. Observes the `DerivingPassphraseWrapKey` progress event to
-/// prove the rejection short-circuits the KDF path.
+/// Encryption rejects a symlink input with `InvalidInput` before emitting a
+/// passphrase-derivation event.
 #[cfg(unix)]
 #[test]
 fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
@@ -637,14 +620,8 @@ fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
     );
 }
 
-/// L-2 regression: on a successful public-key decrypt, `UnlockingPrivateKey`
-/// fires before the private-key Argon2id runs and `Decrypting` fires only after
-/// the envelope/HMAC checks pass (just before streaming unarchive). Pre-audit
-/// the path emitted `Decrypting` immediately at the top of `hybrid::decrypt_file`
-/// and never emitted any KDF event, so a UI would mislabel the multi-second KDF
-/// window as "decrypting". (Post-#7: the legacy single `DerivingKey` event was
-/// split into `UnlockingPrivateKey` for the `private.key` Argon2id boundary
-/// and `DerivingPassphraseWrapKey` for the passphrase recipient.)
+/// Successful private-key decryption emits `UnlockingPrivateKey` before
+/// Argon2id, then `Decrypting` after recipient unwrap and header authentication.
 #[test]
 fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> {
     use ferrocrypt::ProgressEvent;
@@ -718,9 +695,7 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
 /// successful passphrase decrypt must emit exactly one
 /// `DerivingPassphraseWrapKey` per operation (paired with `Encrypting`
 /// or `Decrypting`), and zero `UnlockingPrivateKey` events at any
-/// point — the passphrase path never opens a `private.key`. Pinned
-/// after #7 to guarantee the work-boundary contract for the
-/// passphrase recipient stays honest end to end.
+/// point: passphrase mode does not open a `private.key`.
 #[test]
 fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError> {
     use ferrocrypt::ProgressEvent;
@@ -809,11 +784,8 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
     Ok(())
 }
 
-/// Pure-X25519 encrypt MUST emit zero KDF events (no
-/// `DerivingPassphraseWrapKey`, no `UnlockingPrivateKey`) — every
-/// recipient is wrapped via X25519, which is sub-millisecond. Pre-#7
-/// the orchestrator emitted a generic `DerivingKey` here, lying about
-/// a multi-second pause that never happened.
+/// X25519 encryption performs no passphrase derivation or private-key unlock,
+/// so it must emit neither `DerivingPassphraseWrapKey` nor `UnlockingPrivateKey`.
 #[test]
 fn test_recipient_encrypt_emits_no_kdf_events() -> Result<(), CryptoError> {
     use ferrocrypt::ProgressEvent;
@@ -1718,9 +1690,8 @@ fn test_recipient_header_tamper_detection() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Any flip in the 12-byte prefix MUST be caught at structural parse
-/// before any cryptographic work runs. Pins the version-byte case so
-/// a future change that softens the prefix parse fails the regression.
+/// An unsupported version in the 12-byte prefix must be rejected during
+/// structural parsing, before any cryptographic work.
 #[test]
 fn test_passphrase_prefix_byte_tamper_detected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("passphrase_prefix_byte_tamper");
@@ -2548,8 +2519,8 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
 }
 
 /// Construction is where a `PublicKey` is validated: it succeeds on a
-/// well-formed key file and on canonical raw bytes, and fails with a
-/// structural error (not a panic) on a missing file or a private-key file.
+/// well-formed key file and valid raw bytes. A missing file returns an
+/// input-path error; supplying a private-key file returns a format error.
 #[test]
 fn test_public_key_construction_validates() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("public_key_validate");
@@ -2877,11 +2848,9 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Flipping a byte in the cleartext salt region of a `private.key`
-/// file must cause decryption to fail. The format binds every cleartext
-/// byte before `wrapped_private_key` (header + argon2_salt + kdf_params +
-/// wrap_nonce + ext_bytes) as AEAD associated data, so any header or
-/// body tamper fails authentication on unlock.
+/// Changing the cleartext salt in `private.key` must fail authentication.
+/// All bytes before `wrapped_secret` are AEAD associated data. Other mutations
+/// may fail structural validation before reaching authentication.
 #[test]
 fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("private_key_salt_tamper");

@@ -133,7 +133,8 @@ pub(crate) fn read_file_capped(
 /// caller to reject.
 ///
 /// A remainder above `cap - head_len` is clamped to it, so the read
-/// stays within `cap + 1` bytes whatever `remaining_len` returns.
+/// stays within `cap + 1` bytes whatever `remaining_len` returns, provided
+/// the caller supplies `head_len <= cap`.
 pub(crate) fn read_file_staged(
     path: &Path,
     head_len: usize,

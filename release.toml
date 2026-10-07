@@ -1,7 +1,8 @@
 # A release on this machine, in this order:
 # 1. cargo-release sets the new versions and updates Cargo.lock.
 # 2. It applies the replacements set in ferrocrypt-lib/release.toml: the
-#    CHANGELOG section, and the version in the desktop app and in the README.
+#    CHANGELOG section, and the version in the desktop app and, for a release
+#    without a pre-release suffix, in the README.
 # 3. It runs the hook set in ferrocrypt-lib/release.toml.
 # 4. It makes one commit, tags it, and pushes both.
 # The tag starts .github/workflows/release.yml, which checks, builds, and

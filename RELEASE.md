@@ -61,9 +61,9 @@ That one command, in this order:
    and the CLI's dependency on the library to match.
 2. Moves everything under `## [Unreleased]` in `CHANGELOG.md` into a section
    for the new version, dated with today's date in UTC, and sets the same
-   version in `ferrocrypt-desktop/Cargo.toml` and in `README.md`, the
-   crates.io page of both crates, in its links to the version and its install
-   commands.
+   version in `ferrocrypt-desktop/Cargo.toml`. For a release without a
+   pre-release suffix, it also sets that version in `README.md`, the crates.io
+   page of both crates, in its links to the version and its install commands.
 3. Runs `scripts/release_hook.sh`, which records the new versions in the lock
    files of the desktop app and the fuzz targets, runs the workspace tests as
    every push runs them in CI, then runs the >4 GiB round trip at its full
@@ -148,6 +148,10 @@ version, cargo-semver-checks counts a change of the second number, such as
 - For a release without a pre-release suffix: `README.md` no longer describes
   a pre-release, in its status note and beside its install commands. The
   release changes only the version numbers.
+- For a pre-release: the rule for `README.md` in `ferrocrypt-lib/release.toml`
+  sets `prerelease = true` only if the README describes a changed API or CLI,
+  such as for `0.4.0-rc.1`. Without it, the README's install commands keep
+  naming the last release without a suffix.
 
 The tests need no run of their own: the release runs them. To run them alone,
 for example before you start, use `./scripts/release_hook.sh`. If it changes

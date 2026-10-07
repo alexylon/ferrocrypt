@@ -21,7 +21,7 @@ series.
 
 | Version    | Security fixes                                        |
 |------------|-------------------------------------------------------|
-| 0.3.x      | Supported once 0.3.0 ships.                           |
+| 0.3.x      | Supported.                                            |
 | ≤ 0.2.x    | Best-effort migration guidance only; no patches.      |
 
 When 0.4.x or later ships, the previous 0.x.y series will receive critical

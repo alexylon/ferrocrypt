@@ -23,11 +23,11 @@
 //! [`crate::crypto::keys::with_deterministic_rng`], so regenerating without
 //! changing the generator produces byte-identical output and an empty diff.
 //!
-//! Until stable release `0.3.0` is tagged the corpus may be regenerated
-//! freely: `FORMAT.md` §11.4 places artifacts from pre-release and untagged
-//! revisions outside the cross-release promise, and §12.3 anchors the frozen
-//! publication to the `v0.3.0` tag. From that tag the rows and bytes are
-//! append-only.
+//! Corpus revision 1 is frozen at the `v0.3.0` tag, which `FORMAT.md` §12.3
+//! anchors the publication to. From that tag the rows and bytes are
+//! append-only: a new case is appended under a higher `CORPUS_REVISION`, and
+//! `write_appended_table` refuses any edit to or withdrawal of a published
+//! row, which goes through `errata.tsv` instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

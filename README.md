@@ -28,19 +28,17 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
   <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-4.png" width="400" alt="FerroCrypt">
 </div>
 
-> **Status:** This repository is preparing the **v0.3.0** release and is now at
-> the **release-candidate** stage (`0.3.0-rc.N`). The previous `0.2.5` line
-> uses a different on-disk format, public API, and CLI, and is not compatible
-> with v0.3.0; everything below describes the v0.3.0 line. Pre-releases of
-> v0.3.0 (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) are published to
-> crates.io and GitHub Releases. They are opt-in — `cargo add ferrocrypt` will
-> not select them automatically; the exact version must be pinned in
-> `Cargo.toml`. **The wire format, public API, and CLI are now considered final
-> for v0.3.0; a breaking change before the final cut would only land to fix a
-> critical issue found during the release-candidate period.** Files produced by
-> any v0.3.0 pre-release or by `main` are not interchangeable with `0.2.5`. See
-> `CHANGELOG.md`](CHANGELOG.md#unreleased) for the full list of breaking changes
-> so far.
+> **Status:** **v0.3.0** is the current stable release and the first release of
+> the format described below. From this release the on-disk format is covered
+> by the compatibility promise in [`FORMAT.md`](ferrocrypt-lib/FORMAT.md) §11.4:
+> files and key pairs written by v0.3.0 stay readable under every later
+> release. The library's public API is pre-1.0: patch releases (`0.3.x`)
+> preserve it, and a minor release (`0.4.0`) may change it. The previous
+> `0.2.5` line uses a different on-disk format, public API, and CLI, and is not
+> compatible with v0.3.0. Files written by a v0.3.0 pre-release
+> (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) or by an untagged build of
+> `main` are outside the compatibility promise. See
+> [`CHANGELOG.md`](CHANGELOG.md) for the full list of changes since `0.2.5`.
 
 ## Table of contents
 
@@ -92,7 +90,7 @@ Available release artifacts include:
 ### Rust library
 
 ```bash
-# Current v0.3.0 release candidate
+# The release this README describes
 cargo add ferrocrypt@0.3.0-rc.5
 ```
 
@@ -103,7 +101,7 @@ API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/fe
 Install from crates.io:
 
 ```bash
-# Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
+# The release this README describes
 cargo install ferrocrypt-cli --version 0.3.0-rc.5
 ```
 
@@ -296,7 +294,7 @@ Encrypted output is named automatically and can be changed with Save As. Key fil
 - **Typed library errors.** The Rust API distinguishes wrong credentials, unsupported data, authentication failures, truncation, and resource-limit failures.
 - **Pure Rust implementation.** The cryptographic implementation does not depend on OpenSSL. The library forbids `unsafe` code.
 
-Multi-recipient public-key encryption is supported by the library API. A single `.fcr` file can be encrypted for several X25519 public keys, allowing any matching private key to decrypt it.
+Multi-recipient public-key encryption is supported by the library API and the CLI. A single `.fcr` file can be encrypted for several X25519 public keys, allowing any matching private key to decrypt it.
 
 ## Security and limitations
 
@@ -355,6 +353,7 @@ The canonical technical references are:
 - [**`THREAT_MODEL.md`**](THREAT_MODEL.md) — security boundary, trust assumptions, supported profiles, severity, and release rules.
 - [**`FORMAT.md`**](ferrocrypt-lib/FORMAT.md) — `.fcr`, `private.key`, `public.key`, recipient entries, payload stream, extension data, and archive rules.
 - [**`STRUCTURE.md`**](ferrocrypt-lib/STRUCTURE.md) — library organization, API boundaries, dependency direction, and decryption flow.
+- [**`testvectors/wire/`**](ferrocrypt-lib/testvectors/wire/README.md) — the frozen conformance corpus: the artifacts, expected results, and rejection classes an independent implementation replays to prove it reads the format correctly.
 
 The cryptographic implementation uses:
 
@@ -370,7 +369,7 @@ The cryptographic implementation uses:
 
 ## Rust version support
 
-The `ferrocrypt` library crate currently targets **MSRV 1.87**. This minimum supported Rust version is checked in CI and may be raised in future releases if required by dependencies or language changes.
+The `ferrocrypt` library crate targets **MSRV 1.87**. The `ferrocrypt-cli` crate requires Rust 1.89 because of a dependency. Both minimums are checked in CI and may be raised in future releases if required by dependencies or language changes.
 
 ## License
 

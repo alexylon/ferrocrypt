@@ -18,12 +18,12 @@ baseline_id     = 0.3.0 the compatibility promise these cases evidence
 
 ## Status
 
-Populated and replaying. **Not yet frozen**: until stable release `0.3.0` is
-tagged, the corpus may be regenerated freely, because `FORMAT.md` §11.4 places
-artifacts from pre-release and untagged revisions outside the cross-release
-promise. From the `v0.3.0` tag, manifest rows, artifact bytes, expected results,
-digests, and class meanings are append-only and immutable; corrections use the
-errata mechanism in §12.3 rather than edits.
+**Frozen.** Corpus revision 1 is frozen at stable release `0.3.0`; the `v0.3.0`
+tag addresses it permanently at the URL `FORMAT.md` §12.3 names. Its manifest
+rows, artifact bytes, expected results, digests, and class meanings are
+append-only and immutable: a later revision appends rows and increments
+`CORPUS-REVISION`, and corrections use the errata mechanism in §12.3 rather
+than edits.
 
 ## What is here
 

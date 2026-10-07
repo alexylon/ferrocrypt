@@ -90,10 +90,10 @@
 //! FerroCrypt stores four independent version bytes: `.fcr` outer-container
 //! version `0x01`, FCA archive version `0x01`, public-key encoding version
 //! `0x01`, and private-key encoding version `0x01`. The compatibility
-//! guarantee starts with the first stable `0.3.0` release. During the
-//! `0.3.0` pre-release series (`-alpha.N`, `-beta.N`, `-rc.N`), the format
-//! is not yet frozen: files written by a pre-release or by `main` carry no
-//! cross-version guarantee and may fail to decrypt under a later pre-release.
+//! guarantee starts with the first stable `0.3.0` release. The `0.3.0`
+//! pre-release series (`-alpha.N`, `-beta.N`, `-rc.N`) is outside it: files
+//! written by a pre-release or by an untagged build of `main` carry no
+//! cross-version guarantee and may fail to decrypt under a later release.
 //!
 //! Stable `0.3.0` establishes the `0.3.0` compatibility baseline
 //! (`FORMAT.md` §11.4): artifacts that use only the four stored versions

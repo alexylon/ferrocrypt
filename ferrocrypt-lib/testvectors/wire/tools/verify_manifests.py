@@ -455,10 +455,24 @@ def is_structural_file(relative):
     )
 
 
+# Names of the files operating systems write into a directory a user opens:
+# macOS Finder's .DS_Store and Windows Explorer's Thumbs.db and desktop.ini.
+# The Rust implementation of the same rule holds the same list.
+OS_METADATA_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
+
+def is_os_metadata_name(name):
+    """Whether a file name is one an operating system writes on its own: a
+    name in the list above, or an AppleDouble "._" file, which macOS writes
+    beside a file on a volume that cannot hold its extended attributes. Such a
+    file is not corpus content, and .gitignore keeps it out of every commit."""
+    return name in OS_METADATA_NAMES or name.startswith("._")
+
+
 def check_every_file_is_referenced(root, tables):
-    """Reports any file the manifests do not name. A corpus is frozen and
-    append-only, so an unreferenced file would be committed forever with no
-    digest behind it."""
+    """Reports any file the manifests do not name, except metadata an
+    operating system wrote. A corpus is frozen and append-only, so an
+    unreferenced file would be committed forever with no digest behind it."""
     referenced = set()
     for name, pairs in DIGEST_PAIRS.items():
         for row in tables[name]:
@@ -470,9 +484,10 @@ def check_every_file_is_referenced(root, tables):
             referenced.add(row["payload_key_ref"])
 
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        parts = path.relative_to(root).parts
+        if not path.is_file() or any(is_os_metadata_name(part) for part in parts):
             continue
-        relative = path.relative_to(root).as_posix()
+        relative = "/".join(parts)
         if is_structural_file(relative) or relative in referenced:
             continue
         fail(f"{relative}: no manifest row references this file")

@@ -171,6 +171,28 @@ class CommittedCorpus(unittest.TestCase):
         self.assertTrue(output.rstrip().endswith("— OK"), output)
 
 
+class UnreferencedFiles(unittest.TestCase):
+    """A file no row names is reported, except metadata an operating system
+    wrote, which is not corpus content."""
+
+    def test_only_operating_system_metadata_goes_unreported(self):
+        with tempfile.TemporaryDirectory(prefix="ferrocrypt-verifier-test-") as tmp:
+            root = Path(tmp) / "wire"
+            shutil.copytree(CORPUS, root)
+            for name in [".DS_Store", "desktop.ini", "artifacts/._a.fcr", "artifacts/Thumbs.db"]:
+                (root / name).write_bytes(b"")
+            status, output = run_verifier(root)
+            self.assertEqual(status, 0, output)
+
+            unreferenced = [".gitattributes", "artifacts/stray.bin"]
+            for name in unreferenced:
+                (root / name).write_bytes(b"")
+            status, output = run_verifier(root)
+            self.assertEqual(status, 1, output)
+            for name in unreferenced:
+                self.assertIn(f"{name}: no manifest row references this file", output)
+
+
 class TestValueCapabilities(unittest.TestCase):
     """No reader implements a test type name, a test tag, or a reserved tag,
     so no capability may name one."""

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, PrivateKey};
+use ferrocrypt_test_support::assert_tree_matches;
 
 /// Passphrase every frozen fixture uses (both the passphrase `.fcr` files and
 /// the `private.key` unlock). Fixture-only; not a secret.
@@ -65,46 +66,6 @@ fn recipient_decrypt(fcr: PathBuf, private_key: PathBuf, out: &Path) -> PathBuf 
     }
 }
 
-/// Sorted `(path-relative-to-root, bytes)` for every regular file under `root`.
-fn read_files_recursive(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).expect("read frozen dir") {
-            let path = entry.expect("frozen dir entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .expect("relative path")
-                    .to_path_buf();
-                let bytes = fs::read(&path).expect("read frozen file");
-                out.push((rel, bytes));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-fn assert_dirs_equal(expected_root: &Path, actual_root: &Path) {
-    let expected = read_files_recursive(expected_root);
-    let actual = read_files_recursive(actual_root);
-    let expected_paths: Vec<_> = expected.iter().map(|(p, _)| p.clone()).collect();
-    let actual_paths: Vec<_> = actual.iter().map(|(p, _)| p.clone()).collect();
-    assert_eq!(
-        expected_paths, actual_paths,
-        "frozen fixture file set differs after decrypt"
-    );
-    for ((path, expected_bytes), (_, actual_bytes)) in expected.iter().zip(actual.iter()) {
-        assert_eq!(
-            expected_bytes, actual_bytes,
-            "frozen fixture content differs after decrypt at {path:?}"
-        );
-    }
-}
-
 #[test]
 fn frozen_fixtures_still_decrypt_with_current_reader() {
     for &version in FROZEN_VERSIONS {
@@ -146,12 +107,12 @@ fn frozen_fixtures_still_decrypt_with_current_reader() {
         let out = tmp.path().join(format!("{version}_pw_dir"));
         fs::create_dir_all(&out).unwrap();
         let got = passphrase_decrypt(encrypted.join("small_dir.passphrase.fcr"), &out);
-        assert_dirs_equal(&source.join(SMALL_DIR_NAME), &got);
+        assert_tree_matches(&source.join(SMALL_DIR_NAME), &got);
 
         // Recipient directory.
         let out = tmp.path().join(format!("{version}_rc_dir"));
         fs::create_dir_all(&out).unwrap();
         let got = recipient_decrypt(encrypted.join("small_dir.recipient.fcr"), private_key, &out);
-        assert_dirs_equal(&source.join(SMALL_DIR_NAME), &got);
+        assert_tree_matches(&source.join(SMALL_DIR_NAME), &got);
     }
 }

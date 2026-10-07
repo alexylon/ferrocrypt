@@ -2,6 +2,9 @@
 **/.idea
 dest*
 .DS_Store
+._*
+Thumbs.db
+desktop.ini
 .sofos/
 .claude/
 __pycache__/

@@ -34,6 +34,10 @@
 
 pub mod wire_manifest;
 
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use ferrocrypt::Passphrase;
 use ferrocrypt::{Encryptor, KdfParams, KeyPairGenerator};
 
@@ -141,4 +145,90 @@ pub fn remove_per_process_workspace(root: &str) {
         let _ = std::fs::remove_dir_all(&own);
     }
     let _ = std::fs::remove_dir(root);
+}
+
+/// Names of the files operating systems write into a directory a user opens:
+/// macOS Finder's `.DS_Store` and Windows Explorer's `Thumbs.db` and
+/// `desktop.ini`. `testvectors/wire/tools/verify_manifests.py` holds the same
+/// list.
+const OS_METADATA_NAMES: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
+
+/// Whether a directory entry name is one an operating system writes on its
+/// own: `.DS_Store`, `Thumbs.db`, `desktop.ini`, or an AppleDouble `._` file,
+/// which macOS writes beside a file on a volume that cannot hold its extended
+/// attributes.
+///
+/// `.gitignore` lists every such name, so no committed test tree holds one,
+/// and a test that scans the working copy of a committed tree skips it.
+pub fn is_os_metadata_name(name: &OsStr) -> bool {
+    let name = name.as_encoded_bytes();
+    name.starts_with(b"._")
+        || OS_METADATA_NAMES
+            .iter()
+            .any(|known| name == known.as_bytes())
+}
+
+/// Asserts that the tree at `actual` holds the same directories and files,
+/// with the same bytes, as the working copy of a committed tree at
+/// `expected`. Metadata an operating system wrote into `expected`
+/// ([`is_os_metadata_name`]) is left out; `actual` is compared whole.
+///
+/// # Panics
+///
+/// If the trees differ, or if either holds an entry that is neither a file
+/// nor a directory or cannot be read.
+pub fn assert_tree_matches(expected: &Path, actual: &Path) {
+    let expected_entries = tree_entries(expected, is_os_metadata_name);
+    let actual_entries = tree_entries(actual, |_| false);
+    let expected_paths: Vec<_> = expected_entries.iter().map(|(path, _)| path).collect();
+    let actual_paths: Vec<_> = actual_entries.iter().map(|(path, _)| path).collect();
+    assert_eq!(
+        expected_paths,
+        actual_paths,
+        "the entries under {} and {} differ",
+        expected.display(),
+        actual.display()
+    );
+    for ((path, expected_content), (_, actual_content)) in
+        expected_entries.iter().zip(&actual_entries)
+    {
+        assert_eq!(
+            expected_content,
+            actual_content,
+            "{} differs under {}",
+            path.display(),
+            actual.display()
+        );
+    }
+}
+
+/// Every entry under `root` except those `skip` names, as `(path relative to
+/// root, content)` sorted by path: a file's bytes, or `None` for a directory.
+fn tree_entries(root: &Path, skip: fn(&OsStr) -> bool) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read tree directory") {
+            let entry = entry.expect("read tree entry");
+            if skip(&entry.file_name()) {
+                continue;
+            }
+            let path = entry.path();
+            let file_type = entry.file_type().expect("read tree entry type");
+            let content = if file_type.is_dir() {
+                None
+            } else if file_type.is_file() {
+                Some(fs::read(&path).expect("read tree file"))
+            } else {
+                panic!("{}: neither a file nor a directory", path.display());
+            };
+            let relative = path.strip_prefix(root).expect("entry is under the root");
+            out.push((relative.to_path_buf(), content));
+            if file_type.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
 }

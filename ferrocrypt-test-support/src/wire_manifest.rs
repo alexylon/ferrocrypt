@@ -618,7 +618,8 @@ pub fn is_structural_corpus_file(relative: &str) -> bool {
         || relative.starts_with("tools/")
 }
 
-/// Every file under `root`, recursively.
+/// Every file under `root`, recursively, leaving out metadata an operating
+/// system wrote ([`crate::is_os_metadata_name`]), which is not corpus content.
 ///
 /// # Panics
 ///
@@ -628,7 +629,11 @@ pub fn corpus_files(root: &Path) -> Vec<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).expect("read corpus directory") {
-            let path = entry.expect("read corpus entry").path();
+            let entry = entry.expect("read corpus entry");
+            if crate::is_os_metadata_name(&entry.file_name()) {
+                continue;
+            }
+            let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
             } else {
@@ -642,6 +647,36 @@ pub fn corpus_files(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Operating-system metadata is left out at every depth, and nothing else
+    /// is: a hidden file that is not such metadata is still a corpus file.
+    #[test]
+    fn corpus_files_leaves_out_only_operating_system_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("artifacts")).unwrap();
+        for file in [
+            "cases.tsv",
+            ".gitattributes",
+            ".DS_Store",
+            "desktop.ini",
+            "artifacts/a.fcr",
+            "artifacts/._a.fcr",
+            "artifacts/Thumbs.db",
+        ] {
+            fs::write(root.join(file), b"").unwrap();
+        }
+
+        let mut found: Vec<PathBuf> = corpus_files(root)
+            .into_iter()
+            .map(|path| path.strip_prefix(root).unwrap().to_path_buf())
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [".gitattributes", "artifacts/a.fcr", "cases.tsv"].map(PathBuf::from)
+        );
+    }
 
     /// Every reference column, `origins.tsv`'s `payload_key_ref` included,
     /// admits a corpus path and refuses every form that could name a file

@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::Passphrase;
 use ferrocrypt::{CryptoError, Decryptor, Encryptor, PrivateKey, PublicKey};
-use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
+use ferrocrypt_test_support::{
+    assert_tree_matches, fast_keypair_generator, fast_passphrase_encryptor, is_os_metadata_name,
+};
 
 const FIXTURE_PASSPHRASE: &str = "fixture-passphrase-not-secret-do-not-reuse";
 const TEST_WORKSPACE: &str = "tests/workspace_fixture_stability";
@@ -74,43 +76,26 @@ fn cleanup() {
     ferrocrypt_test_support::remove_per_process_workspace(TEST_WORKSPACE);
 }
 
-fn read_files_recursive(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).expect("read_dir fixture tree") {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            let ft = entry.file_type().expect("file_type");
-            if ft.is_dir() {
-                stack.push(path);
-            } else if ft.is_file() {
-                let rel = path.strip_prefix(root).expect("strip_prefix").to_path_buf();
-                let bytes = fs::read(&path).expect("read fixture file");
-                out.push((rel, bytes));
-            }
+/// Copies the tree at `from` to `to` without the metadata an operating system
+/// wrote into it ([`is_os_metadata_name`]), keeping each file's permissions.
+/// An entry that is neither a file nor a directory is refused, as the archive
+/// writer would refuse it.
+fn copy_without_os_metadata(from: &Path, to: &Path) {
+    fs::create_dir(to).expect("create fixture source copy");
+    for entry in fs::read_dir(from).expect("read fixture source tree") {
+        let entry = entry.expect("fixture source entry");
+        if is_os_metadata_name(&entry.file_name()) {
+            continue;
         }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-fn assert_dirs_equal(expected_root: &Path, actual_root: &Path) {
-    let expected = read_files_recursive(expected_root);
-    let actual = read_files_recursive(actual_root);
-    let expected_paths: Vec<_> = expected.iter().map(|(p, _)| p.clone()).collect();
-    let actual_paths: Vec<_> = actual.iter().map(|(p, _)| p.clone()).collect();
-    assert_eq!(
-        expected_paths, actual_paths,
-        "fixture file set differs between expected and actual"
-    );
-    for ((path, expected_bytes), (_, actual_bytes)) in expected.iter().zip(actual.iter()) {
-        assert_eq!(
-            expected_bytes,
-            actual_bytes,
-            "fixture content drifted at {}",
-            path.display()
-        );
+        let target = to.join(entry.file_name());
+        let file_type = entry.file_type().expect("fixture source entry type");
+        if file_type.is_dir() {
+            copy_without_os_metadata(&entry.path(), &target);
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).expect("copy fixture source file");
+        } else {
+            panic!("{}: neither a file nor a directory", entry.path().display());
+        }
     }
 }
 
@@ -156,7 +141,7 @@ fn decrypt_passphrase_dir_fixture_matches_source() {
     let out = fresh_temp("decrypt_passphrase_dir");
     passphrase_decrypt(encrypted_dir().join(PASSPHRASE_DIR_FCR), &out)
         .expect("decrypt passphrase-dir fixture");
-    assert_dirs_equal(
+    assert_tree_matches(
         &source_dir().join(SMALL_DIR_NAME),
         &out.join(SMALL_DIR_NAME),
     );
@@ -180,7 +165,7 @@ fn decrypt_recipient_dir_fixture_matches_source() {
     let out = fresh_temp("decrypt_recipient_dir");
     recipient_decrypt(encrypted_dir().join(RECIPIENT_DIR_FCR), &out)
         .expect("decrypt recipient-dir fixture");
-    assert_dirs_equal(
+    assert_tree_matches(
         &source_dir().join(SMALL_DIR_NAME),
         &out.join(SMALL_DIR_NAME),
     );
@@ -194,6 +179,11 @@ fn decrypt_recipient_dir_fixture_matches_source() {
 #[test]
 #[ignore]
 fn regenerate_fixtures() {
+    // The directory fixtures encrypt a copy of the source tree without the
+    // metadata an operating system wrote into it, which is not fixture content.
+    let small_dir = fresh_temp("regenerate_source").join(SMALL_DIR_NAME);
+    copy_without_os_metadata(&source_dir().join(SMALL_DIR_NAME), &small_dir);
+
     if encrypted_dir().exists() {
         fs::remove_dir_all(encrypted_dir()).expect("clean encrypted/");
     }
@@ -224,7 +214,7 @@ fn regenerate_fixtures() {
 
     fast_passphrase_encryptor(fixture_passphrase())
         .save_as(encrypted_dir().join(PASSPHRASE_DIR_FCR))
-        .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
+        .write(&small_dir, encrypted_dir(), |_| {})
         .expect("encrypt passphrase-dir fixture");
 
     Encryptor::with_public_key(
@@ -238,6 +228,6 @@ fn regenerate_fixtures() {
         PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)).expect("read public key"),
     )
     .save_as(encrypted_dir().join(RECIPIENT_DIR_FCR))
-    .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
+    .write(&small_dir, encrypted_dir(), |_| {})
     .expect("encrypt recipient-dir fixture");
 }

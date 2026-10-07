@@ -49,10 +49,13 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// content. Failure to obtain it can leave an empty entry if cleanup also
 /// fails. Any remaining `.incomplete` entry blocks a retry.
 ///
-/// This policy applies to normal `Err` returns. Extraction does not run its
-/// cleanup during panic unwinding; a panic, process termination, or power loss
-/// can leave staged plaintext under either policy. The caller must inspect or
-/// remove that output explicitly.
+/// A normal `Err` return applies this policy and reports, in the returned
+/// error, a removal that failed or could not be confirmed. A panic unwind
+/// applies it as well, best effort and without a report, because the panic
+/// is what propagates. A panic in a build with `panic = "abort"` aborts the
+/// process instead. An abort, any other process termination, and power loss
+/// run no cleanup, so staged plaintext can remain under either policy; the
+/// caller must inspect or remove that output explicitly.
 ///
 /// This enum deliberately does not implement `Copy`: future policies may
 /// carry owned configuration, such as a destination for retained output.

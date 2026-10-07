@@ -51,6 +51,7 @@ use std::ffi::{OsStr, OsString};
 #[cfg(test)]
 use std::fs;
 use std::io::{self, Read};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use cap_std::fs::{Dir, File};
@@ -214,7 +215,7 @@ where
     // redirect the `remove_*` calls.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
-    let mut staged_root: Option<StagedRoot> = None;
+    let mut cleanup = StagedCleanup::new(&output_handle, &manifest, &policy);
 
     // Steps 10–17 wrapped so the cleanup below sees `output_handle`
     // still alive on every error path.
@@ -229,7 +230,7 @@ where
                 &output_handle,
                 &incomplete_name,
                 &manifest,
-                &mut staged_root,
+                &mut cleanup.root,
                 output_dir,
             )?;
         } else {
@@ -238,7 +239,7 @@ where
                 &output_handle,
                 &incomplete_name,
                 &manifest,
-                &mut staged_root,
+                &mut cleanup.root,
                 output_dir,
                 compare_owners,
             )?;
@@ -294,7 +295,8 @@ where
         // made afterwards.
         let mut extra_name_error = None;
         if manifest.root_is_file {
-            let handle = staged_root
+            let handle = cleanup
+                .root
                 .as_ref()
                 .and_then(StagedRoot::file_handle)
                 .ok_or(crate::error::internal_invariant!(
@@ -347,7 +349,8 @@ where
         // below: a filesystem may also give an object a new identifier
         // once its last handle closes, so a name read after that close
         // would no longer match.
-        let staged_identity = staged_root
+        let staged_identity = cleanup
+            .root
             .as_ref()
             .map_or(StagedIdentity::NoHandle, StagedRoot::identity);
         let ratified = if extra_name_error.is_some() {
@@ -367,7 +370,7 @@ where
         // and only keeps the retained handle open for those checks.
         let mut ratified_root: Option<StagedRoot> = None;
         if matches!(ratified, Ok(PromotedIdentity::Confirmed)) {
-            ratified_root = staged_root.take();
+            ratified_root = cleanup.root.take();
         }
 
         after_root_mode(&ratified_root)?;
@@ -387,7 +390,7 @@ where
         // The record moves out of the cleanup slot on the same terms as
         // at ratification.
         if ratified_root.is_none() {
-            ratified_root = staged_root.take();
+            ratified_root = cleanup.root.take();
         }
 
         // The returned path was built from the ambient `output_dir`
@@ -429,25 +432,9 @@ where
         }
     })();
 
-    // A removal that fails, or cannot show that the staged root is gone,
-    // is reported next to the error: the original error alone would
-    // read as if nothing remained. A record that already left the
-    // cleanup slot is a ratified commit, which is not this policy's to
-    // remove.
-    let outcome = match outcome {
-        Err(error) if matches!(policy, IncompleteOutputPolicy::DeleteOnError) => {
-            Err(match staged_root.take() {
-                Some(staged) => staged.remove(&output_handle, &manifest).report(
-                    error,
-                    output_dir,
-                    &incomplete_name,
-                ),
-                None => error,
-            })
-        }
-        outcome => outcome,
-    };
-
+    // A returned error gets the policy here, with a report; a panic
+    // skips this line and gets it from `StagedCleanup`'s `Drop`.
+    let outcome = cleanup.finish(outcome, output_dir, &incomplete_name);
     drop(output_handle);
     outcome
 }
@@ -1368,6 +1355,11 @@ impl StagedRoot {
     /// caller can report a removal that failed or could not be
     /// confirmed next to the error it is already returning.
     ///
+    /// Also runs while a panic unwinds, from the `Drop` of
+    /// [`StagedCleanup`]. The guard catches a panic raised here during
+    /// the unwind, so the process does not abort, but such a panic still
+    /// ends the cleanup half-way: nothing on this path should panic.
+    ///
     /// A staged file is emptied through the handle it was created with,
     /// where one is held, and then unlinked by name through
     /// `output_handle`, the same `Dir` extraction wrote through, so a
@@ -1420,6 +1412,85 @@ impl StagedRoot {
                 handle,
                 modes_applied.then_some(manifest),
             ),
+        }
+    }
+}
+
+/// The cleanup slot for the staged root: the record of what this run
+/// created, while the run still treats it as staged, together with what
+/// a removal needs.
+///
+/// Once the guarded steps return, [`Self::finish`] empties the slot and
+/// applies the policy to a returned error, reporting the outcome next to
+/// it. A record is therefore still in the slot at `Drop` only when a
+/// panic unwound through the steps, and `Drop` applies the same policy to
+/// it without a report, because the panic is what propagates. That is the
+/// best-effort cleanup `THREAT_MODEL.md` TM-14 describes for a completed
+/// unwind; an abort, process termination, or power loss runs no code at
+/// all. The slot decides this rather than `std::thread::panicking()`,
+/// because that also returns `true` when this call returns normally
+/// inside an unwind that began elsewhere. The policy is read once, so
+/// both paths apply the same one, and a record a ratification moved out
+/// of the slot is beyond the reach of either.
+struct StagedCleanup<'a> {
+    /// What this run staged, while the run still treats it as staged.
+    root: Option<StagedRoot>,
+    output_handle: &'a Dir,
+    manifest: &'a Manifest,
+    delete_on_error: bool,
+}
+
+impl<'a> StagedCleanup<'a> {
+    fn new(
+        output_handle: &'a Dir,
+        manifest: &'a Manifest,
+        policy: &IncompleteOutputPolicy,
+    ) -> Self {
+        Self {
+            root: None,
+            output_handle,
+            manifest,
+            delete_on_error: matches!(policy, IncompleteOutputPolicy::DeleteOnError),
+        }
+    }
+
+    /// Ends the guard once the steps have returned rather than unwound.
+    /// The record leaves the slot first, so `Drop` has nothing left to
+    /// remove. A returned error then has the policy applied to a record
+    /// still staged, and a removal that fails, or cannot show that the
+    /// staged root is gone, is reported next to it: the error alone would
+    /// read as if nothing remained. A success is returned unchanged, and
+    /// so is an error when the policy retains staged output or a
+    /// ratification already moved the record out, because a ratified
+    /// commit is not this policy's to remove.
+    fn finish(
+        mut self,
+        outcome: Result<PathBuf, CryptoError>,
+        output_dir: &Path,
+        working_name: &OsStr,
+    ) -> Result<PathBuf, CryptoError> {
+        let staged = self.root.take();
+        outcome.map_err(|error| match staged {
+            Some(root) if self.delete_on_error => root
+                .remove(self.output_handle, self.manifest)
+                .report(error, output_dir, working_name),
+            _ => error,
+        })
+    }
+}
+
+impl Drop for StagedCleanup<'_> {
+    fn drop(&mut self) {
+        // A record here means a panic is unwinding through the steps:
+        // `finish` empties the slot whenever they return. A panic from
+        // the removal is caught, because one that escaped a destructor
+        // during an unwind would abort the process.
+        if !self.delete_on_error {
+            return;
+        }
+        if let Some(root) = self.root.take() {
+            let (output_handle, manifest) = (self.output_handle, self.manifest);
+            let _ = catch_unwind(AssertUnwindSafe(|| root.remove(output_handle, manifest)));
         }
     }
 }
@@ -3227,66 +3298,145 @@ mod tests {
         );
     }
 
-    /// Records the current panic behavior: cleanup runs on a returned error,
-    /// not during unwinding. A reader panic after staging therefore leaves
-    /// `.incomplete` output even under `DeleteOnError`.
-    #[test]
-    fn panic_during_extraction_preserves_incomplete_under_delete_on_error() {
-        use std::panic::AssertUnwindSafe;
+    /// `Read` wrapper that delivers `panic_at` bytes from `inner` and
+    /// panics on the next read, so a test can unwind out of extraction
+    /// at a chosen point in the content stream.
+    struct PanicAfterN<R: Read> {
+        inner: R,
+        bytes_read: u64,
+        panic_at: u64,
+    }
 
-        struct PanicAfterN<R: Read> {
-            inner: R,
-            bytes_read: u64,
-            panic_at: u64,
-        }
-
-        impl<R: Read> Read for PanicAfterN<R> {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                if self.bytes_read >= self.panic_at {
-                    panic!("test-induced panic at byte {}", self.bytes_read);
-                }
-                let remaining = (self.panic_at - self.bytes_read) as usize;
-                let n_target = buf.len().min(remaining);
-                let n = self.inner.read(&mut buf[..n_target])?;
-                self.bytes_read += n as u64;
-                Ok(n)
+    impl<R: Read> Read for PanicAfterN<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.bytes_read >= self.panic_at {
+                panic!("test-induced panic at byte {}", self.bytes_read);
             }
+            let remaining = (self.panic_at - self.bytes_read) as usize;
+            let n_target = buf.len().min(remaining);
+            let n = self.inner.read(&mut buf[..n_target])?;
+            self.bytes_read += n as u64;
+            Ok(n)
         }
+    }
 
-        let tmp = tempfile::TempDir::new().unwrap();
-        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
-        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+    /// Runs an extraction that must panic and returns the panic payload
+    /// once the unwind has been caught, so a test can check what the
+    /// unwind left behind.
+    fn unarchive_expecting_panic<R, B, A, M>(
+        reader: R,
+        out: &Path,
+        policy: IncompleteOutputPolicy,
+        seams: Seams<B, A, M>,
+    ) -> Box<dyn std::any::Any + Send>
+    where
+        R: Read,
+        B: FnOnce() -> Result<(), CryptoError>,
+        A: FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
+        M: FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
+    {
+        catch_unwind(AssertUnwindSafe(|| {
+            unarchive_inner_with_hooks(reader, out, ArchiveLimits::default(), policy, seams)
+        }))
+        .expect_err("expected the panic to propagate out of the extraction")
+    }
 
-        // Set the panic point one byte before EOF so the panic fires
-        // deep inside `copy_exact_n`'s content loop — well after
-        // `create_file_at` has staged `hello.txt.incomplete`.
+    /// Runs an extraction whose reader panics one byte before the end of
+    /// the content — deep inside the content loop, after the root was
+    /// staged — and returns once the unwind has been caught.
+    fn unarchive_with_panicking_reader(
+        archive: Vec<u8>,
+        out: &Path,
+        policy: IncompleteOutputPolicy,
+    ) {
         let panic_at = archive.len() as u64 - 1;
-        let panicking_reader = PanicAfterN {
+        let reader = PanicAfterN {
             inner: Cursor::new(archive),
             bytes_read: 0,
             panic_at,
         };
+        unarchive_expecting_panic(
+            reader,
+            out,
+            policy,
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
+            },
+        );
+    }
 
-        let tmp_path = tmp.path().to_path_buf();
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            unarchive(
-                panicking_reader,
-                &tmp_path,
-                ArchiveLimits::default(),
-                IncompleteOutputPolicy::DeleteOnError,
-            )
-        }));
+    /// A panic unwind applies `DeleteOnError` to the staged root
+    /// (`THREAT_MODEL.md` TM-14): a reader panic after `create_file_at`
+    /// has staged the file leaves no `.incomplete` behind, and no output.
+    #[test]
+    fn panic_during_extraction_removes_incomplete_under_delete_on_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        unarchive_with_panicking_reader(archive, tmp.path(), IncompleteOutputPolicy::DeleteOnError);
 
         assert!(
-            result.is_err(),
-            "expected panic to propagate out of unarchive"
+            !tmp.path().join("hello.txt.incomplete").exists(),
+            "DeleteOnError must remove the staged file during the unwind"
+        );
+        assert!(!tmp.path().join("hello.txt").exists());
+    }
+
+    /// `RetainOnError` keeps the staged root across a panic unwind, as it
+    /// does across a returned error.
+    #[test]
+    fn panic_during_extraction_keeps_incomplete_under_retain_on_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        unarchive_with_panicking_reader(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError);
+
+        assert!(
+            tmp.path().join("hello.txt.incomplete").exists(),
+            "RetainOnError must keep the staged file across the unwind"
+        );
+    }
+
+    /// A panic after the commit is ratified leaves the committed output
+    /// alone: the record has already left the cleanup slot, so the
+    /// unwind removes nothing (`THREAT_MODEL.md` TM-06, TM-14).
+    #[test]
+    fn panic_after_ratification_preserves_the_committed_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        let payload = unarchive_expecting_panic(
+            Cursor::new(archive),
+            tmp.path(),
+            IncompleteOutputPolicy::DeleteOnError,
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |ratified: &Option<StagedRoot>| -> Result<(), CryptoError> {
+                    if ratified.is_none() {
+                        panic!("the record must have left the cleanup slot");
+                    }
+                    panic!("test-induced panic after ratification")
+                },
+            },
+        );
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("test-induced panic after ratification")
         );
 
-        let incomplete = tmp_path.join("hello.txt.incomplete");
-        assert!(
-            incomplete.exists(),
-            ".incomplete must survive panic regardless of policy",
+        assert_eq!(
+            fs::read(tmp.path().join("hello.txt")).unwrap(),
+            b"Hello, world!"
         );
+        assert!(!tmp.path().join("hello.txt.incomplete").exists());
     }
 
     // -- Fault-injection harness (Batch 3) --------------------------------
@@ -4587,6 +4737,21 @@ mod tests {
         }
     }
 
+    /// Calls [`restore_traversable`] on its directory when dropped, so a
+    /// case that stops early, on a failed assertion or an unexpected
+    /// panic, still leaves a tree the temp-directory cleanup can remove.
+    /// `restore_traversable` ignores every error, so it cannot panic
+    /// while a failing case unwinds.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct RestoreTraversableOnDrop<'a>(&'a Path);
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for RestoreTraversableOnDrop<'_> {
+        fn drop(&mut self) {
+            restore_traversable(self.0);
+        }
+    }
+
     /// Drives every combination of root kind, policy, payload
     /// completeness, local-writer interference, stored root mode, and
     /// (for directory roots) a locked descendant directory through
@@ -4958,6 +5123,40 @@ mod tests {
             .expect("with nothing to compare against the check must accept");
     }
 
+    /// The stored modes driven through the two nested directories of
+    /// [`nested_mode_archive`]: each owner permission set that withholds
+    /// read, write, or search permission, the common read-only `0o555`,
+    /// and `0o755`, which withholds nothing and so shows that restoring
+    /// is harmless when nothing is locked.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const NESTED_DIRECTORY_MODES: [u32; 9] = [
+        0o000, 0o100, 0o200, 0o300, 0o400, 0o500, 0o555, 0o600, 0o755,
+    ];
+
+    /// A directory root with plaintext two levels deep, both levels
+    /// stored with `nested_mode`, so a failure after Pass 3 leaves the
+    /// staged tree in whatever state that mode allows.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn nested_mode_archive(nested_mode: u32) -> Vec<u8> {
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/ro", ArchiveEntryKind::Directory, 0, nested_mode),
+                make_entry("d/ro/a.txt", ArchiveEntryKind::File, 4, 0o644),
+                make_entry("d/ro/deep", ArchiveEntryKind::Directory, 0, nested_mode),
+                make_entry("d/ro/deep/b.txt", ArchiveEntryKind::File, 4, 0o644),
+            ],
+            total_file_bytes: 8,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        build_archive(
+            &manifest,
+            &[("d/ro/a.txt", b"real"), ("d/ro/deep/b.txt", b"real")],
+        )
+    }
+
     /// A failure after Pass 3 has applied the stored directory modes
     /// leaves the staged tree in whatever state those modes allow. A
     /// mode without owner write permission refuses the unlinking of
@@ -4970,28 +5169,12 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cleanup_restores_the_modes_it_applied_before_removing_the_staged_tree() {
-        for nested_mode in [0o000, 0o100, 0o200, 0o300, 0o400, 0o500, 0o555, 0o755] {
+        for nested_mode in NESTED_DIRECTORY_MODES {
             let tmp = tempfile::TempDir::new().unwrap();
             let out = tmp.path().join("out");
             fs::create_dir(&out).unwrap();
-
-            let manifest = Manifest {
-                entries: vec![
-                    make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
-                    make_entry("d/ro", ArchiveEntryKind::Directory, 0, nested_mode),
-                    make_entry("d/ro/a.txt", ArchiveEntryKind::File, 4, 0o644),
-                    make_entry("d/ro/deep", ArchiveEntryKind::Directory, 0, nested_mode),
-                    make_entry("d/ro/deep/b.txt", ArchiveEntryKind::File, 4, 0o644),
-                ],
-                total_file_bytes: 8,
-                root_name: OsString::from("d"),
-                root_is_file: false,
-                root_mode: 0o755,
-            };
-            let archive = build_archive(
-                &manifest,
-                &[("d/ro/a.txt", b"real"), ("d/ro/deep/b.txt", b"real")],
-            );
+            let _traversable = RestoreTraversableOnDrop(&out);
+            let archive = nested_mode_archive(nested_mode);
 
             let err = unarchive_inner_with_hooks(
                 Cursor::new(archive),
@@ -5014,7 +5197,6 @@ mod tests {
                 .flatten()
                 .map(|e| e.file_name())
                 .collect();
-            restore_traversable(&out);
             assert!(
                 remaining.is_empty(),
                 "mode {nested_mode:o}: DeleteOnError left {remaining:?} in the output directory",
@@ -5022,6 +5204,52 @@ mod tests {
             assert!(
                 matches!(&err, CryptoError::InvalidInput(message) if message == "injected failure"),
                 "mode {nested_mode:o}: a confirmed removal must add no report, got: {err}",
+            );
+        }
+    }
+
+    /// A panic after Pass 3 has applied the stored descendant modes
+    /// unwinds through the same restoration a returned error gets: the
+    /// modes the run applied are restored before the staged tree is
+    /// removed, so a stored mode without owner write, read, or search
+    /// permission cannot keep the run's own plaintext on disk.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn panic_after_descendant_modes_restores_them_and_removes_the_staged_tree() {
+        for nested_mode in NESTED_DIRECTORY_MODES {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let out = tmp.path().join("out");
+            fs::create_dir(&out).unwrap();
+            let _traversable = RestoreTraversableOnDrop(&out);
+            let archive = nested_mode_archive(nested_mode);
+
+            let payload = unarchive_expecting_panic(
+                Cursor::new(archive),
+                &out,
+                IncompleteOutputPolicy::DeleteOnError,
+                Seams {
+                    compare_owners: platform::compare_owners,
+                    before_promotion: || -> Result<(), CryptoError> {
+                        panic!("test-induced panic before promotion")
+                    },
+                    after_promotion: |_| Ok(()),
+                    after_root_mode: |_| Ok(()),
+                },
+            );
+            assert_eq!(
+                payload.downcast_ref::<&str>().copied(),
+                Some("test-induced panic before promotion"),
+                "mode {nested_mode:o}: the unwind must carry the injected panic",
+            );
+
+            let remaining: Vec<_> = fs::read_dir(&out)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            assert!(
+                remaining.is_empty(),
+                "mode {nested_mode:o}: the unwind left {remaining:?} in the output directory",
             );
         }
     }

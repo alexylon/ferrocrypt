@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
 ### Changed
 - **The `reason` text of `CryptoError::MalformedArchive`, `UnsafeArchivePath`, and `InvalidArchiveTree` is now documented as a description for people, not a stable identifier.** It may change in any release. Code that needs to tell these errors apart should match on the variant; when an archive is read, each variant is a `FORMAT.md` §12.1 diagnostic class. No behavior changed.
 

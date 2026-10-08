@@ -68,6 +68,7 @@ ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.9"
 stats_alloc = "0.1.10"
 
-# `process` is for the archive/encode.rs test that lowers the open-file limit.
+# `process` is for the open-file-limit test harness (`archive/fd_limit.rs`)
+# and for the archive/decode.rs tests that skip as root.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 rustix = { version = "1", features = ["process"] }

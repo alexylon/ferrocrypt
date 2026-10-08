@@ -2354,7 +2354,9 @@ mod tests {
 
         let mut tmp = tempfile::Builder::new().tempfile_in(out.path()).unwrap();
         tmp.write_all(b"payload").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
 
         let finalized = commit_to(tmp, &final_path, "Output")
             .map_err(FinalizeFileError::into_crypto_error)
@@ -2375,7 +2377,9 @@ mod tests {
 
         let mut tmp = tempfile::Builder::new().tempfile_in(out.path()).unwrap();
         tmp.write_all(b"payload").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
 
         let error = commit_to(tmp, &final_path, "Output")
             .expect_err("an occupied final name must refuse the commit");

@@ -412,7 +412,12 @@ impl SearchOnlyDir {
 
     /// Applies the write-and-search-only mode. Called once the test has
     /// staged whatever it needs, since staging itself reads nothing.
-    pub(crate) fn close_reading(&self) {
+    ///
+    /// Returns whether the mode took effect. A privileged runner, such
+    /// as root, still reads the directory, so the calling test has
+    /// nothing to prove there and returns early.
+    #[must_use]
+    pub(crate) fn close_reading(&self) -> bool {
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::set_permissions(
@@ -420,10 +425,7 @@ impl SearchOnlyDir {
             std::fs::Permissions::from_mode(WRITE_AND_SEARCH_ONLY_MODE),
         )
         .unwrap();
-        assert!(
-            std::fs::read_dir(&self.path).is_err(),
-            "the directory must not be readable, or the test proves nothing"
-        );
+        std::fs::read_dir(&self.path).is_err()
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
@@ -672,7 +674,9 @@ mod tests {
     fn a_search_only_anchor_cannot_read_the_directory_it_commits_into() {
         let out = SearchOnlyDir::new();
         fs::write(out.path().join("staged"), b"payload").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
 
         let anchor = open_commit_anchor(out.path()).unwrap();
         anchor
@@ -691,7 +695,9 @@ mod tests {
     fn the_no_replace_rename_commits_through_a_search_only_anchor() {
         let out = SearchOnlyDir::new();
         fs::write(out.path().join("staged"), b"payload").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
         let anchor = open_commit_anchor(out.path()).unwrap();
 
         assert!(matches!(
@@ -709,7 +715,9 @@ mod tests {
         let out = SearchOnlyDir::new();
         fs::write(out.path().join("staged"), b"payload").unwrap();
         fs::write(out.path().join("out"), b"existing").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
         let anchor = open_commit_anchor(out.path()).unwrap();
 
         let error = rename_no_replace_at(&anchor, OsStr::new("staged"), OsStr::new("out"))
@@ -727,7 +735,9 @@ mod tests {
         fs::write(out.path().join("file.incomplete"), b"payload").unwrap();
         fs::create_dir(out.path().join("dir.incomplete")).unwrap();
         fs::write(out.path().join("dir.incomplete").join("f"), b"inner").unwrap();
-        out.close_reading();
+        if !out.close_reading() {
+            return;
+        }
         let anchor = open_commit_anchor(out.path()).unwrap();
 
         let linked = commit_by_link_or_claim(

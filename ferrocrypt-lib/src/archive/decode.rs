@@ -3536,8 +3536,7 @@ mod tests {
 
     /// Read-only `output_dir` (mode `0o500`): `unarchive` must fail
     /// at the first cap-std write attempt (mkdir/create_file), and
-    /// `DeleteOnError` must not leave anything behind. Pin the §11
-    /// "Output dir is read-only" case.
+    /// `DeleteOnError` must not leave anything behind.
     #[cfg(unix)]
     #[test]
     fn read_only_output_dir_fails_with_no_leak() {
@@ -3547,6 +3546,12 @@ mod tests {
         let out = tmp.path().join("out");
         fs::create_dir(&out).unwrap();
         fs::set_permissions(&out, fs::Permissions::from_mode(0o500)).unwrap();
+        // A privileged runner, such as root, can still create entries
+        // here, so the case cannot be produced.
+        if tempfile::tempfile_in(&out).is_ok() {
+            fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
 
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
@@ -3557,14 +3562,13 @@ mod tests {
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
         );
+        // Restore write before asserting, so a failed assertion still
+        // leaves a directory the cleanup can empty.
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             result.is_err(),
             "expected creation failure on read-only dir"
         );
-
-        // Restore write so tempdir cleanup can remove the dir AND
-        // assert nothing leaked under it.
-        fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
         let count = fs::read_dir(&out).unwrap().count();
         assert_eq!(
             count, 0,

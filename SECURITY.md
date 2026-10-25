@@ -27,17 +27,20 @@ series.
 When 0.4.x or later ships, the previous 0.x.y series will receive critical
 fixes for one minor cycle and then transition to migration-only.
 
-## Audit status
+## Dependency review
 
-FerroCrypt has not undergone an independent third-party security audit.
 The [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) AEAD
-crate that handles payload encryption was [audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/).
+crate that handles payload encryption was [audited by NCC Group](https://www.nccgroup.com/research/public-report-rustcrypto-aesgcm-and-chacha20pluspoly1305-implementation-review/).
+The [`curve25519-dalek`](https://crates.io/crates/curve25519-dalek) crate
+that X25519 key agreement is built on was [audited by Quarkslab](https://blog.quarkslab.com/security-audit-of-dalek-libraries.html).
 
 Dependency review is tracked with `cargo vet`. Several core crypto crates
 are covered by imported audits or maintainer-approved exemptions rather than
 first-party audits by this project, so a passing `cargo vet` run means the
 configured supply-chain policy is satisfied; it is not an independent audit
 of each cryptographic dependency by the FerroCrypt project.
+
+## Stored formats
 
 The current stored formats are `.fcr` outer-container version `0x01`,
 FCA archive version `0x01`, public-key encoding version `0x01`, and

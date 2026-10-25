@@ -23,7 +23,7 @@ Related canonical documents have separate responsibilities:
 - [STRUCTURE.md](ferrocrypt-lib/STRUCTURE.md) specifies code architecture and
   implementation invariants.
 - [SECURITY.md](SECURITY.md) explains vulnerability reporting, supported
-  release lines, audit status, and user-facing limitations.
+  release lines, dependency review, and user-facing limitations.
 
 This document governs security scope and release classification. A
 contradiction between canonical documents is a documentation defect under

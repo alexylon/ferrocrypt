@@ -349,8 +349,15 @@ was written.
 
 ## Security
 
-FerroCrypt has **not undergone an independent third-party security audit**.
-The [security policy](SECURITY.md) covers audit status, known limitations, and
+FerroCrypt uses only established, published algorithms from widely used Rust
+libraries; the [technical reference](#technical-reference) lists them. The
+`chacha20poly1305` library that encrypts file contents was
+[audited by NCC Group](https://www.nccgroup.com/research/public-report-rustcrypto-aesgcm-and-chacha20pluspoly1305-implementation-review/),
+and the `curve25519-dalek` library that X25519 key agreement is built on was
+[audited by Quarkslab](https://blog.quarkslab.com/security-audit-of-dalek-libraries.html).
+The file format is fully specified and has public
+[test vectors](ferrocrypt-lib/testvectors/wire/README.md). The
+[security policy](SECURITY.md) covers dependency review, known limitations, and
 private vulnerability reporting. The [threat model](THREAT_MODEL.md) defines the
 security guarantees and their assumptions.
 

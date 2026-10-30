@@ -2,7 +2,7 @@
 
 <h1 align="center">FerroCrypt</h1>
 
-<p align="center"><a href="https://www.ferrocrypt.app">www.ferrocrypt.app</a></p>
+<p align="center"><a href="https://ferrocrypt.app">www.ferrocrypt.app</a></p>
 
 [![Build and tests](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml)
 [![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.3.0)

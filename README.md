@@ -65,7 +65,8 @@ Security**, click **Open Anyway**, then confirm **Open**. See
 
 ### Install the desktop app from the Snap Store
 
-On Linux distributions with snap support, such as Ubuntu:
+On Linux distributions with snap support, such as Ubuntu, install it from the
+[Snap Store](https://snapcraft.io/ferrocrypt) or the Ubuntu App Center, or run:
 
 ```bash
 sudo snap install ferrocrypt

@@ -15,20 +15,30 @@ publish = false
 #
 # 1.18.1 or newer: older versions change the window's size when it moves to a
 # display with a different scale (seen on Wayland). Pinned exactly because
-# `i-slint-backend-testing` must match it: update `slint`, `slint-build`, and
-# `i-slint-backend-testing` together.
+# `i-slint-backend-testing` must match it: update both `slint` lines,
+# `slint-build`, and `i-slint-backend-testing` together.
 slint = "=1.18.1"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 regex-lite = "0.1"
 arboard = "3"
 
+# The window frame the app draws where the system draws none (`src/own_frame.rs`):
+# `wayland-client` asks the compositor whether it draws frames, and Slint's
+# winit access moves the window and opens its menu. Both crates are in the tree
+# already through Slint's winit backend; keep `wayland-client` at the minor
+# version winit uses. Slint may change its winit module in a minor release,
+# which the exact pin covers.
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+slint = { version = "=1.18.1", features = ["unstable-winit-030"] }
+wayland-client = "0.31"
+
 # Test-only fast Argon2id parameters (19 MiB floor) so the dispatch test does
 # not pay the 1 GiB production KDF. Not published (this crate is publish = false).
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
-# Finds window elements in the passphrase-field test. It does not follow
-# semver, so it must match `slint` exactly.
+# Finds window elements in the passphrase-field and layout tests. It does not
+# follow semver, so it must match `slint` exactly.
 i-slint-backend-testing = "=1.18.1"
 
 [build-dependencies]

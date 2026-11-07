@@ -14,6 +14,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+#[cfg(all(unix, not(target_vendor = "apple")))]
+mod own_frame;
 mod password_scorer;
 
 /// The recipient key resolved at the moment the user selected it, shared
@@ -290,6 +292,8 @@ fn main() {
     app.set_combined_picker(cfg!(target_os = "macos"));
     // Slint fills the X11 or Wayland selection clipboard only on these targets.
     app.set_selection_clipboard(cfg!(all(unix, not(target_vendor = "apple"))));
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    own_frame::install(&app);
 
     let selected_public_key: SelectedPublicKey = Arc::new(Mutex::new(None));
 
@@ -956,7 +960,7 @@ fn snap_back_mode(mode: i32) -> i32 {
 mod tests {
     use super::*;
     use ferrocrypt_test_support::{fast_kdf_params, fs_matrix_tempdir};
-    use i_slint_backend_testing::ElementHandle;
+    use i_slint_backend_testing::{ElementHandle, ElementRoot};
     use slint::platform::software_renderer::MinimalSoftwareWindow;
     use slint::platform::{
         Clipboard, Key, Platform, PointerEventButton, WindowAdapter, WindowEvent,
@@ -1748,7 +1752,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         not(debug_assertions),
-        ignore = "needs Slint debug info, which only builds with debug assertions include"
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
     )]
     fn masked_passphrase_fields_keep_their_text_in_the_window() {
         const PASSPHRASE: &str = "hunter2";
@@ -1771,21 +1775,11 @@ mod tests {
         app.set_password_repeated(PASSPHRASE.into());
         let w = app.window();
 
-        let element = |id: &str| {
-            ElementHandle::find_by_element_id(&app, id)
-                .next()
-                .unwrap_or_else(|| panic!("no element {id}"))
-        };
         // Starts a new click sequence, so `times` alone decides between a
         // single and a double click.
         let click = |id: &str, times: usize| {
             clock.set(clock.get() + Duration::from_secs(1));
-            let field = element(id);
-            let (origin, size) = (field.absolute_position(), field.size());
-            let position = slint::LogicalPosition::new(
-                origin.x + size.width / 2.0,
-                origin.y + size.height / 2.0,
-            );
+            let position = centre_of(&app, id);
             let button = PointerEventButton::Left;
             for _ in 0..times {
                 w.dispatch_event(WindowEvent::PointerPressed { position, button });
@@ -1870,5 +1864,244 @@ mod tests {
             "Tab did not reach the confirmation"
         );
         assert_eq!(app.get_password(), password);
+    }
+
+    /// A headless platform for layout checks.
+    struct Headless(Rc<MinimalSoftwareWindow>);
+
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The app's window on a headless platform, for tests that measure or
+    /// click it.
+    fn headless_app() -> AppWindow {
+        slint::platform::set_platform(Box::new(Headless(MinimalSoftwareWindow::new(
+            Default::default(),
+        ))))
+        .expect("no other test sets a platform on this thread");
+        AppWindow::new().unwrap()
+    }
+
+    /// Every form fits the fixed window: the Reset and action buttons stay
+    /// inside it, at the same height in every mode, and the last field ends
+    /// above the notification bar. Each form is also checked with an error
+    /// long enough to wrap, which makes the bar ask for more room: the bar
+    /// takes only room the form leaves free, so no field moves. Create key
+    /// pair once pushed the buttons half out of the window on Linux, whose
+    /// fonts set taller lines than macOS. Both window frames are checked: the
+    /// system's, and the app's own with its title bar.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn every_form_fits_the_window() {
+        const FINGERPRINT: &str =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // The last field of each form is one of these, depending on the mode.
+        const FIELDS: [&str; 6] = [
+            "AppWindow::out-ta",
+            "AppWindow::key-ta",
+            "AppWindow::fp-field",
+            "AppWindow::kgout-ta",
+            "AppWindow::pwd-ti",
+            "AppWindow::rpwd-ti",
+        ];
+        // Only public-key encryption shows a fingerprint.
+        const FORMS: [(i32, &str); 6] = [
+            (MODE_PASSPHRASE_ENCRYPT, ""),
+            (MODE_PASSPHRASE_DECRYPT, ""),
+            (MODE_RECIPIENT_ENCRYPT, ""),
+            (MODE_RECIPIENT_ENCRYPT, FINGERPRINT),
+            (MODE_RECIPIENT_DECRYPT, ""),
+            (MODE_KEYGEN, ""),
+        ];
+
+        let app = headless_app();
+        app.show().unwrap();
+        for own_frame in [false, true] {
+            app.set_own_frame(own_frame);
+            // The headless window has no size of its own; the root element has
+            // the window's.
+            let window_height = app.root_element().size().height;
+            assert!(window_height > 0.0, "the window has no height");
+            let element = |id: &str| ElementHandle::find_by_element_id(&app, id).next();
+
+            const WORD: &str = "word ";
+            let long_error = WORD.repeat(STATUS_LINE_MAX * STATUS_ERROR_LINES / WORD.len());
+            let mut button_tops = Vec::new();
+            let mut bar_grew = false;
+            for (mode, fingerprint) in FORMS {
+                let mut without_error = None;
+                for error in ["", long_error.as_str()] {
+                    app.set_mode(mode);
+                    app.set_key_fingerprint(fingerprint.into());
+                    app.set_status_err(error.into());
+                    let case = format!(
+                        "own frame {own_frame}, mode {mode}, fingerprint {}, error {}",
+                        !fingerprint.is_empty(),
+                        !error.is_empty()
+                    );
+
+                    let button = element("AppWindow::start-ta").expect("the action button exists");
+                    let button_top = button.absolute_position().y;
+                    let button_bottom = button_top + button.size().height;
+                    assert!(
+                        button_bottom <= window_height,
+                        "{case}: the button ends at {button_bottom}, below the window's {window_height}"
+                    );
+                    button_tops.push((case.clone(), button_top));
+
+                    let last_field_bottom = FIELDS
+                        .iter()
+                        .filter_map(|id| element(id))
+                        .map(|field| field.absolute_position().y + field.size().height)
+                        .reduce(f32::max)
+                        .unwrap_or_else(|| panic!("{case}: none of the fields was found"));
+                    let bar =
+                        element("AppWindow::notify-text").expect("the notification bar exists");
+                    let (bar_top, bar_height) = (bar.absolute_position().y, bar.size().height);
+                    assert!(
+                        last_field_bottom <= bar_top,
+                        "{case}: the last field ends at {last_field_bottom}, under the bar at {bar_top}"
+                    );
+                    let (field_bottom_without_error, bar_height_without_error) =
+                        *without_error.get_or_insert((last_field_bottom, bar_height));
+                    assert_eq!(
+                        last_field_bottom, field_bottom_without_error,
+                        "{case}: the error moves the last field"
+                    );
+                    bar_grew |= bar_height > bar_height_without_error;
+                }
+            }
+            // Otherwise the error never asked for room, and the check above that
+            // no field moves tested nothing.
+            assert!(
+                bar_grew,
+                "the long error did not make the bar taller in any mode"
+            );
+            let (first_case, first_top) = &button_tops[0];
+            for (case, top) in &button_tops {
+                assert_eq!(
+                    top, first_top,
+                    "{case} moves the button from where {first_case} has it"
+                );
+            }
+        }
+    }
+
+    /// The centre of the element `id`, in window coordinates.
+    fn centre_of(app: &AppWindow, id: &str) -> slint::LogicalPosition {
+        let element = ElementHandle::find_by_element_id(app, id)
+            .next()
+            .unwrap_or_else(|| panic!("no element {id}"));
+        let (origin, size) = (element.absolute_position(), element.size());
+        slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0)
+    }
+
+    /// Presses `id`'s centre with `button` and releases it there.
+    fn click(app: &AppWindow, id: &str, button: PointerEventButton) {
+        let position = centre_of(app, id);
+        app.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        app.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
+    /// The app's own title bar passes each gesture to the matching window
+    /// action: pressing the bar moves the window, a right click opens the
+    /// window menu where it was clicked, and each button does what its
+    /// label says.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn the_own_title_bar_passes_each_gesture_to_its_action() {
+        let app = headless_app();
+        app.set_own_frame(true);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let record = |action: &'static str| {
+            let actions = actions.clone();
+            move || actions.borrow_mut().push(action.to_string())
+        };
+        app.on_move_window(record("move"));
+        app.on_minimize_window(record("minimize"));
+        app.on_close_window(record("close"));
+        app.on_show_window_menu({
+            let actions = actions.clone();
+            move |x, y| actions.borrow_mut().push(format!("menu at {x},{y}"))
+        });
+        app.show().unwrap();
+
+        click(&app, "AppWindow::title-bar", PointerEventButton::Left);
+        click(&app, "TitleBar::minimize-button", PointerEventButton::Left);
+        click(&app, "TitleBar::close-button", PointerEventButton::Left);
+        click(&app, "AppWindow::title-bar", PointerEventButton::Right);
+
+        let bar = ElementHandle::find_by_element_id(&app, "AppWindow::title-bar")
+            .next()
+            .expect("the title bar exists");
+        let centre = (bar.size().width / 2.0, bar.size().height / 2.0);
+        assert_eq!(
+            *actions.borrow(),
+            [
+                "move".to_string(),
+                "minimize".to_string(),
+                "close".to_string(),
+                format!("menu at {},{}", centre.0, centre.1),
+            ]
+        );
+    }
+
+    /// The close button of the app's own title bar sends the request the
+    /// system's close button sends, which closes the window.
+    #[test]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn the_own_close_button_closes_the_window() {
+        let app = headless_app();
+        app.set_own_frame(true);
+        own_frame::wire(&app);
+        app.show().unwrap();
+        assert!(app.window().is_visible());
+
+        click(&app, "TitleBar::close-button", PointerEventButton::Left);
+        assert!(!app.window().is_visible(), "the window is still open");
+    }
+
+    /// A click after a window move reaches what is under the pointer. The
+    /// compositor keeps the release of the press that started the move, so
+    /// without it the title bar would keep the pointer, and the next press
+    /// anywhere would start another move instead of reaching its target.
+    #[test]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn a_click_after_a_window_move_reaches_its_target() {
+        let app = headless_app();
+        app.set_own_frame(true);
+        own_frame::wire(&app);
+        app.show().unwrap();
+
+        let position = centre_of(&app, "AppWindow::title-bar");
+        let button = PointerEventButton::Left;
+        app.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        slint::platform::update_timers_and_animations();
+
+        click(&app, "TitleBar::close-button", button);
+        assert!(
+            !app.window().is_visible(),
+            "the close button did not get the click"
+        );
     }
 }

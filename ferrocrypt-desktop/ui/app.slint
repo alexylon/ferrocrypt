@@ -104,6 +104,31 @@ global Theme {
     out property <length> icon-btn: 22px;
     out property <length> window-w: 450px;
     out property <length> window-h: 700px;
+
+    // The app's own window frame, drawn where the system draws none
+    out property <length> title-bar-h: 35px;
+    out property <length> window-radius: 12px;
+    out property <length> title-icon: 8px;
+    out property <length> title-icon-stroke: 1.5px;
+
+    // Lets the form's gaps shrink when a mode needs more height than the
+    // fixed window has. The layout was tuned against the macOS system font,
+    // so macOS keeps rigid gaps; elsewhere, fonts with taller lines need
+    // this in Create key pair mode.
+    out property <bool> flexible-gaps: Platform.os != OperatingSystemType.macos;
+}
+
+// ---------------------------------------------------------------------------
+// Reusable: space above a form section
+// ---------------------------------------------------------------------------
+// Its height is `gap`. With `Theme.flexible-gaps`, it can shrink to `least`
+// when the form needs more height than the window has.
+component FieldGap inherits Rectangle {
+    in property <length> gap: Theme.field-gap;
+    in property <length> least: Theme.gap-md;
+    min-height: Theme.flexible-gaps ? self.least : self.gap;
+    preferred-height: self.gap;
+    max-height: self.gap;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,13 +237,115 @@ component PasswordInput {
 }
 
 // ---------------------------------------------------------------------------
+// Reusable: round title bar button
+// ---------------------------------------------------------------------------
+component TitleButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    width: Theme.icon-btn;
+    height: Theme.icon-btn;
+    border-radius: self.width / 2;
+    background: ta.has-hover ? Theme.surface-hover : Theme.surface;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+    animate background { duration: Theme.dur-fast; }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    @children
+}
+
+// ---------------------------------------------------------------------------
+// Reusable: title bar, for a window whose frame the app draws itself
+// ---------------------------------------------------------------------------
+// Pressing the bar moves the window, and a right click opens the system's
+// window menu. The window has a fixed size, so it offers no maximize button.
+component TitleBar inherits Rectangle {
+    in property <string> title;
+    callback move-window();
+    callback show-window-menu(x: length, y: length);
+    callback minimize-window();
+    callback close-window();
+
+    height: Theme.title-bar-h;
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                if (event.button == PointerEventButton.left) {
+                    root.move-window();
+                } else if (event.button == PointerEventButton.right) {
+                    root.show-window-menu(self.mouse-x, self.mouse-y);
+                }
+            }
+        }
+    }
+
+    Text {
+        text: root.title;
+        color: Theme.text-secondary;
+        font-size: Theme.font-body;
+        font-weight: Theme.weight-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    minimize-button := TitleButton {
+        x: close-button.x - Theme.gap-md - self.width;
+        y: (parent.height - self.height) / 2;
+        label: "Minimize";
+        clicked => {
+            root.minimize-window();
+        }
+
+        Rectangle {
+            width: Theme.title-icon;
+            height: Theme.title-icon-stroke;
+            background: Theme.text-secondary;
+        }
+    }
+
+    close-button := TitleButton {
+        x: parent.width - Theme.gap-md - self.width;
+        y: (parent.height - self.height) / 2;
+        label: "Close";
+        clicked => {
+            root.close-window();
+        }
+
+        Path {
+            width: Theme.title-icon;
+            height: Theme.title-icon;
+            viewbox-width: 1;
+            viewbox-height: 1;
+            commands: "M 0 0 L 1 1 M 1 0 L 0 1";
+            stroke: Theme.text-secondary;
+            stroke-width: Theme.title-icon-stroke;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main application window
 // ---------------------------------------------------------------------------
 export component AppWindow inherits Window {
     title: app-version != "" ? "FerroCrypt v" + app-version : "FerroCrypt";
-    background: Theme.bg;
+    // Where the system draws no frame (GNOME on Wayland, for one), the app
+    // draws its own: a title bar and rounded corners. The window is then
+    // transparent outside them.
+    in property <bool> own-frame: false;
+    no-frame: own-frame;
+    background: own-frame ? transparent : Theme.bg;
     width: Theme.window-w;
-    height: Theme.window-h;
+    height: Theme.window-h + frame-top;
 
     in property <string> app-version;
 
@@ -261,6 +388,8 @@ export component AppWindow inherits Window {
         mode == Mode.passphrase-encrypt || mode == Mode.recipient-encrypt ? "Encrypt" : mode == Mode.passphrase-decrypt || mode == Mode.recipient-decrypt ? "Decrypt" : "Generate key pair";
     property <color> strength-color:
         password-strength <= 1 ? Theme.error : password-strength == 2 ? Theme.warning : password-strength == 3 ? Theme.info : Theme.success;
+    // Where the form starts: below the app's own title bar, if it has one.
+    property <length> frame-top: own-frame ? Theme.title-bar-h : 0px;
 
     // ── Callbacks ───────────────────────────────────────────────────────
     callback mode-changed();
@@ -274,10 +403,38 @@ export component AppWindow inherits Window {
     callback password-edited();
     callback clear-form();
     callback copy-fingerprint();
+    // The app's own frame (see `own-frame`)
+    callback move-window();
+    callback show-window-menu(x: length, y: length);
+    callback minimize-window();
+    callback close-window();
+
+    // ── Own frame: background and title bar ─────────────────────────────
+    if own-frame: Rectangle {
+        background: Theme.bg;
+        border-radius: Theme.window-radius;
+    }
+
+    if own-frame: title-bar := TitleBar {
+        y: 0;
+        title: root.title;
+        move-window => {
+            root.move-window();
+        }
+        show-window-menu(x, y) => {
+            root.show-window-menu(x, y);
+        }
+        minimize-window => {
+            root.minimize-window();
+        }
+        close-window => {
+            root.close-window();
+        }
+    }
 
     // ── Accent stripe ───────────────────────────────────────────────────
     Rectangle {
-        y: 0;
+        y: frame-top;
         width: 100%;
         height: 2px;
         background: @linear-gradient(90deg, Theme.bg, Theme.accent 50%, Theme.bg);
@@ -285,6 +442,8 @@ export component AppWindow inherits Window {
 
     // ── Main layout ─────────────────────────────────────────────────────
     VerticalLayout {
+        y: frame-top;
+        height: Theme.window-h;
         padding-left: Theme.gap-2xl;
         padding-right: Theme.gap-2xl;
         padding-top: Theme.gap-3xl;
@@ -295,6 +454,10 @@ export component AppWindow inherits Window {
         VerticalLayout {
             spacing: 0px;
             alignment: start;
+            // With no stretch, this section shrinks only once the bar below
+            // has shrunk to its minimum, so the fields stay in place when a
+            // message wraps.
+            vertical-stretch: 0;
 
             // ═══════════ HEADER ═══════════
             Text {
@@ -410,9 +573,7 @@ export component AppWindow inherits Window {
             // ═══════════ INPUT FILE / FOLDER ═══════════
             VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: "Source file or folder";
@@ -487,9 +648,7 @@ export component AppWindow inherits Window {
             // ═══════════ OUTPUT ═══════════
             VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: is-encrypt-mode ? "Encrypted file" : "Output location";
@@ -557,8 +716,9 @@ export component AppWindow inherits Window {
             // ═══════════ DIVIDER ═══════════
             VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.gap-2xl;
+                FieldGap {
+                    gap: Theme.gap-2xl;
+                    least: Theme.gap-lg;
                 }
 
                 Rectangle {
@@ -570,9 +730,7 @@ export component AppWindow inherits Window {
             // ═══════════ KEY PAIR SECTION ═══════════
             if mode == Mode.recipient-encrypt || mode == Mode.keygen: VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: "Key source";
@@ -656,9 +814,7 @@ export component AppWindow inherits Window {
             // ═══════════ KEY FILE (HE, HD) ═══════════
             if require-key: VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: mode == Mode.recipient-encrypt ? "Public key" : "Private key";
@@ -716,9 +872,7 @@ export component AppWindow inherits Window {
                 if mode == Mode.recipient-encrypt && key-fingerprint != "": VerticalLayout {
                     property <bool> fp-copied: false;
                     spacing: 0px;
-                    Rectangle {
-                        height: Theme.field-gap;
-                    }
+                    FieldGap { }
 
                     Text {
                         text: "Fingerprint";
@@ -730,7 +884,7 @@ export component AppWindow inherits Window {
                         height: Theme.label-gap;
                     }
 
-                    Rectangle {
+                    fp-field := Rectangle {
                         height: Theme.ctl-height;
                         border-radius: Theme.radius-lg;
                         background: Theme.info-bg;
@@ -794,9 +948,7 @@ export component AppWindow inherits Window {
             // ═══════════ KEY PAIR OUTPUT DIR (GK only) ═══════════
             if mode == Mode.keygen: VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: "Key pair folder";
@@ -855,9 +1007,7 @@ export component AppWindow inherits Window {
             // ═══════════ PASSWORD (SE, SD, HD, GK) ═══════════
             if require-password: VerticalLayout {
                 spacing: 0px;
-                Rectangle {
-                    height: Theme.field-gap;
-                }
+                FieldGap { }
 
                 Text {
                     text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Private key password" : "Password";
@@ -1086,6 +1236,9 @@ export component AppWindow inherits Window {
 
         // ── Spacer: pushes bottom section to a fixed position ──
         Rectangle {
+            // Keeps the bar off the last field; with flexible gaps, the gaps above
+            // shrink instead.
+            min-height: Theme.flexible-gaps ? Theme.gap-lg : 0px;
             vertical-stretch: 1;
         }
 
@@ -1094,10 +1247,12 @@ export component AppWindow inherits Window {
         // ═══════════ NOTIFICATION BAR ═══════════
         // Priority: error > warning > success/progress > "Ready". Only one shown at a time.
         // The bar grows upward into the spacer to fit a wrapped message and
-        // shrinks back to one line when the mode above leaves no room.
+        // shrinks back to one line when the mode above leaves no room. Its
+        // stretch makes the layout shrink it before the form's gaps. With
+        // rigid gaps the form cannot shrink, so the stretch changes nothing.
         Rectangle {
             property <bool> show-ready: !is-working && status-err == "" && conflict-warning == "" && status-ok == "";
-            vertical-stretch: 0;
+            vertical-stretch: 1;
             min-height: Theme.ctl-height;
             preferred-height: max(Theme.ctl-height, notify-text.preferred-height + 2 * Theme.notify-pad);
             max-height: self.preferred-height;
@@ -1188,5 +1343,12 @@ export component AppWindow inherits Window {
         Rectangle {
             height: Theme.field-pad;
         }
+    }
+
+    // ── Own frame: outline, drawn over the content ──────────────────────
+    if own-frame: Rectangle {
+        border-radius: Theme.window-radius;
+        border-width: Theme.hairline;
+        border-color: Theme.border-hover;
     }
 }

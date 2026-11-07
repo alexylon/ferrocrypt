@@ -4,6 +4,10 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The desktop app's Create key pair mode no longer cuts off the Reset and Generate key pair buttons on Linux.** Linux fonts have taller lines than macOS fonts, so the form needed more height than the window has. Except on macOS, the space between fields now shrinks when needed. The macOS app is unchanged.
+- **On GNOME and other Wayland desktops that leave window frames to applications, the desktop app now draws its own title bar, with all four corners rounded.** The frame it had there rounded only the top corners. The title bar shows the window title and the minimize and close buttons: drag it to move the window, or right-click it for the window menu. macOS, Windows, KDE, and X11 sessions keep the system's frame.
+
 ## [0.3.0] - 2026-10-08
 
 ### Changed

@@ -39,6 +39,10 @@ argon2 = { version = "0.5", features = ["std", "zeroize"] }
 sha3 = { version = "0.11", features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
 hkdf = "0.13"
+# Not used directly. `hmac` checks the header MAC with `ctutils`, and `digest`
+# accepts any 0.4.x; this floor keeps out the releases before 0.4.4, which
+# RUSTSEC-2026-0385 affects.
+ctutils = ">=0.4.4, <0.5"
 # Keeps the crate building on Rust 1.87: 0.4.2 needs 1.85, but 0.5 needs 1.95.
 constant_time_eq = ">=0.4.2, <0.5"
 bech32 = "0.11"

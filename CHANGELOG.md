@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **The header MAC check no longer risks taking time that depends on secret values.** It relies on the `ctutils` crate, whose releases before 0.4.4 are affected by advisory RUSTSEC-2026-0385: compiled code could branch where it must run in constant time. The `ferrocrypt` crate now requires `ctutils` 0.4.4 or later, and the CLI and desktop app are built with it. FerroCrypt 0.3.0 binaries were built with an affected release: replace them with this version. Library users who stay on an older `ferrocrypt` can run `cargo update -p ctutils`.
+
 ### Fixed
 - **The desktop app's Create key pair mode no longer cuts off the Reset and Generate key pair buttons on Linux.** Linux fonts have taller lines than macOS fonts, so the form needed more height than the window has. Except on macOS, the space between fields now shrinks when needed. The macOS app is unchanged.
 - **On GNOME and other Wayland desktops that leave window frames to applications, the desktop app now draws its own title bar, with all four corners rounded.** The frame it had there rounded only the top corners. The title bar shows the window title and the minimize and close buttons: drag it to move the window, or right-click it for the window menu. macOS, Windows, KDE, and X11 sessions keep the system's frame.

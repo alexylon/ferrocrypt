@@ -93,13 +93,13 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.ferrocrypt]]
-version = "0.3.0-rc.5"
-when = "2026-10-04"
+version = "0.3.0"
+when = "2026-10-08"
 trusted-publisher = "github:alexylon/ferrocrypt"
 
 [[publisher.ferrocrypt-cli]]
-version = "0.3.0-rc.5"
-when = "2026-10-04"
+version = "0.3.0"
+when = "2026-10-08"
 trusted-publisher = "github:alexylon/ferrocrypt"
 
 [[publisher.fs-set-times]]

@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-07
+
 ### Security
 - **The header MAC check no longer risks taking time that depends on secret values.** It relies on the `ctutils` crate, whose releases before 0.4.4 are affected by advisory RUSTSEC-2026-0385: compiled code could branch where it must run in constant time. The `ferrocrypt` crate now requires `ctutils` 0.4.4 or later, and the CLI and desktop app are built with it. FerroCrypt 0.3.0 binaries were built with an affected release: replace them with this version. Library users who stay on an older `ferrocrypt` can run `cargo update -p ctutils`.
 

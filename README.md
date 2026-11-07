@@ -47,7 +47,7 @@ Download the package for your system from [GitHub Releases](https://github.com/a
 | System | Command-line tool | Desktop app |
 |---|---|---|
 | macOS, Intel or Apple silicon | `.tar.gz` | `.zip` containing `FerroCrypt.app` |
-| Linux, 64-bit Intel/AMD | `.tar.gz`, `gnu` or `musl` | `.deb` for Debian/Ubuntu |
+| Linux, 64-bit Intel/AMD | `.tar.gz`, `gnu` or `musl` | `.deb` for Debian/Ubuntu, or the [Snap Store](#install-the-desktop-app-from-the-snap-store) |
 | Linux, 64-bit ARM | `.tar.gz`, `musl` | Build from source |
 | Windows, 64-bit Intel/AMD | `.zip` | `.msi` installer |
 
@@ -62,6 +62,21 @@ nor the command-line tool is notarized by Apple, so macOS may block each the
 first time you run it. If it does, open **System Settings → Privacy &
 Security**, click **Open Anyway**, then confirm **Open**. See
 [Apple's instructions](https://support.apple.com/en-us/102445).
+
+### Install the desktop app from the Snap Store
+
+On Linux distributions with snap support, such as Ubuntu:
+
+```bash
+sudo snap install ferrocrypt
+```
+
+The snap can open files in your home folder. To use files on USB drives and
+other removable media, also run:
+
+```bash
+sudo snap connect ferrocrypt:removable-media
+```
 
 ### Install the command-line tool with Cargo
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=FerroCrypt
+Comment=Encrypt files and folders with a password or a key pair
+Exec=ferrocrypt
+Icon=${SNAP}/meta/gui/icon.png
+Terminal=false
+Categories=Utility;Security;
+Keywords=encrypt;decrypt;encryption;password;key;
+StartupWMClass=ferrocrypt-desktop

@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
+
 ## [0.3.1] - 2026-11-07
 
 ### Security

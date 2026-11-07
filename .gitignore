@@ -16,3 +16,6 @@ __pycache__/
 # payload the large-file test writes.
 **/tests/workspace*/
 **/tests/cli_workspace*/
+
+# Built snap packages
+*.snap

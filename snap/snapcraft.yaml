@@ -1,0 +1,71 @@
+name: ferrocrypt
+title: FerroCrypt
+summary: Encrypt files and folders with a password or a key pair
+description: |
+  FerroCrypt encrypts files and folders into a single .fcr file.
+
+  Choose how to protect your data:
+
+  - Password: use the same password to encrypt and decrypt.
+  - Key pair: encrypt with a recipient's public key. Decryption requires the
+    matching private key and its password. The app can also create key pairs.
+
+  FerroCrypt uses standard, widely reviewed cryptography: XChaCha20-Poly1305
+  encryption, Argon2id for passwords, X25519 for key pairs, and HKDF and HMAC
+  with SHA3-256. Any change to an encrypted file is detected when you decrypt
+  it. The file format is openly documented, and the source code is published
+  under the GPL-3.0 license.
+
+  FerroCrypt runs on Linux, macOS, and Windows, as a desktop app and a
+  command-line tool. A file encrypted on one system decrypts on the others.
+
+  Encryption leaves the original files in place. File contents are processed
+  in chunks, so an entire file does not need to fit in memory. A password is
+  processed with 1 GiB of memory for a few seconds, which makes guessing it
+  slow and costly for an attacker.
+
+  The app can open files in your home folder. To use files on USB drives and
+  other removable media, run:
+  sudo snap connect ferrocrypt:removable-media
+adopt-info: ferrocrypt
+license: GPL-3.0-only
+website: https://ferrocrypt.app
+source-code: https://github.com/alexylon/ferrocrypt
+issues: https://github.com/alexylon/ferrocrypt/issues
+icon: ferrocrypt-desktop/assets/app_icon.png
+
+base: core24
+grade: stable
+confinement: strict
+
+apps:
+  ferrocrypt:
+    command: bin/ferrocrypt-desktop
+    extensions: [gnome]
+    plugs:
+      - home
+      - removable-media
+
+parts:
+  ferrocrypt:
+    plugin: rust
+    # Builds the committed code only, so the local target/ folders are not copied
+    source: .
+    source-type: git
+    # The desktop app is outside the Cargo workspace
+    rust-path: [ferrocrypt-desktop]
+    # The GNOME extension points this at the SDK's C library, on which rustup
+    # and cargo crash. The build links against the build-packages below; the
+    # extension provides the matching libraries at run time.
+    build-environment:
+      - LD_LIBRARY_PATH: ""
+    build-packages:
+      - libfontconfig-dev
+      - libfreetype-dev
+      - libxcb-shape0-dev
+      - libxcb-xfixes0-dev
+      - libxkbcommon-dev
+      - libwayland-dev
+    override-pull: |
+      craftctl default
+      craftctl set version="$(grep -m1 '^version' ferrocrypt-desktop/Cargo.toml | cut -d '"' -f2)"

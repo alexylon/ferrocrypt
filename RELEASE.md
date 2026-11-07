@@ -38,6 +38,33 @@ and limit on GitHub who can start it:
    crates.io, and revoke the API token your machine used to publish, at
    <https://crates.io/settings/tokens>. Then only the workflow can publish
    them.
+5. Give the workflow a Snap Store login that may upload and release only the
+   `ferrocrypt` snap, as a secret of the `release` environment, so that only a
+   run that a release tag started can read it.
+
+   Run the commands below in a terminal of its own, as `snapcraft` asks for the
+   Ubuntu One email and password of the account that owns the snap, and in an
+   empty folder outside the repository, so that the login file cannot be
+   committed if a step fails:
+
+   ```bash
+   cd "$(mktemp -d)" && umask 077 &&
+   expires="$(date -u -v+1y +%Y-%m-%dT%H:%M:%S 2> /dev/null ||
+       date -u -d '+1 year' +%Y-%m-%dT%H:%M:%S)" &&
+   snapcraft export-login --snaps=ferrocrypt \
+       --acls=package_access,package_push,package_update,package_release \
+       --expires="$expires" ferrocrypt-snap.login &&
+   gh secret set SNAPCRAFT_STORE_CREDENTIALS --env release \
+       -R alexylon/ferrocrypt < ferrocrypt-snap.login &&
+   rm ferrocrypt-snap.login && echo "The login expires on $expires UTC."
+   ```
+
+   The first `date` form is the one macOS accepts, the second the one Linux
+   accepts. Each command runs only if the one before it succeeded, so the
+   login file stays if `gh secret set` fails. That command needs a token with
+   permission to change environments. If yours has none, add the secret on
+   GitHub instead, among the `release` environment's secrets, and then remove
+   the file. Before the login expires, make a new one the same way.
 
 ## Making a release
 
@@ -87,15 +114,20 @@ The tag starts `.github/workflows/release.yml`, which:
    builds those crates as crates.io will receive them.
 2. Builds the CLI and the desktop app for Linux, macOS (Intel and Apple
    silicon), and Windows, and the static Linux CLI for x86-64 and arm64, which
-   it also checks for shared libraries and runs on Alpine.
+   it also checks for shared libraries and runs on Alpine. Builds the desktop
+   app's snap for x86-64 and arm64 from `snap/snapcraft.yaml`.
 3. Checks that the tag still names its commit, that the commit is on `main`,
    and that it packages the crates exactly as step 1 built them. Then it
    publishes `ferrocrypt` to crates.io, then `ferrocrypt-cli`.
 4. Checks the tag and `main` again, then creates a GitHub release with the
    archives, marked as a pre-release when the version has a suffix such as
    `-rc.5`.
+5. After the crates are published, checks the tag and `main` again and uploads
+   both snaps to the Snap Store, released to `stable`, or to `beta` for a
+   version with a suffix.
 
-Nothing reaches crates.io unless every check and build has passed.
+Nothing reaches crates.io or the Snap Store unless every check and build has
+passed.
 
 A new crate to publish goes into `PUBLISHED_CRATES` in
 `.github/workflows/release.yml`. Until it is there, or until its `Cargo.toml`
@@ -182,6 +214,9 @@ release if the desktop app's `Cargo.toml` does not match the tag.
 The release hook records the new versions in the `Cargo.lock` files of the
 app and of the fuzz targets, which are outside the workspace too.
 
+The snap takes its version from the app's `Cargo.toml`, and the release
+workflow's snap build checks that it names the tag's version.
+
 ## If something fails
 
 On your machine, before anything was pushed:
@@ -253,6 +288,16 @@ In the release workflow, after the push:
   yank `ferrocrypt` as below, fix the cause, and release the next version.
 - The crates are on crates.io but the GitHub release failed: re-run the failed
   jobs.
+- The snap build failed: nothing was published, as for any other build.
+- The snap upload failed: if the Snap Store refused the login, make a new one
+  as in step 5 under "Once, before the first release from the workflow", then
+  re-run the failed jobs. The workflow uploads both snaps before it releases
+  either. If the store says that a snap was already uploaded, an earlier
+  attempt uploaded it: with `snapcraft revisions ferrocrypt`, find the
+  revisions of this version, upload any snap still missing from the run's
+  artifacts with `snapcraft upload <file>`, and release each revision with
+  `snapcraft release ferrocrypt <revision> stable` (or `beta` for a version
+  with a suffix).
 - After a release, the `vet` job fails with `ferrocrypt:X.Y.Z missing
   ["safe-to-deploy"]`: no wildcard audit in `supply-chain/audits.toml` covers
   the new version's publisher, which the job's output names. If it is

@@ -102,6 +102,11 @@ global Theme {
     out property <length> reset-width: 54px;
     out property <length> btn-width: 56px;
     out property <length> icon-btn: 22px;
+    out property <length> icon: 11px;
+    out property <length> icon-stroke: 1.5px;
+    // Wide enough for "Strong" in the system fonts, so the meter beside it
+    // keeps its length whatever the label says.
+    out property <length> strength-label-w: 40px;
     out property <length> window-w: 450px;
     out property <length> window-h: 700px;
 
@@ -109,7 +114,6 @@ global Theme {
     out property <length> title-bar-h: 35px;
     out property <length> window-radius: 12px;
     out property <length> title-icon: 8px;
-    out property <length> title-icon-stroke: 1.5px;
 
     // Lets the form's gaps shrink when a mode needs more height than the
     // fixed window has. The layout was tuned against the macOS system font,
@@ -160,6 +164,47 @@ component SmallButton inherits Rectangle {
         font-size: Theme.font-body;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reusable: one choice of a segmented control
+// ---------------------------------------------------------------------------
+// Grows from no width rather than from its label, so the choices of one
+// control are equally wide and keep their width when a bold label moves. A
+// click on the active choice does nothing: the form already shows it, and
+// choosing it again would reset the form.
+component Choice inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    in property <bool> bold-when-active;
+    callback chosen();
+
+    min-width: 0;
+    preferred-width: 0;
+    horizontal-stretch: 1;
+    background: root.active ? Theme.accent-muted : ta.has-hover && root.enabled ? Theme.surface-hover : transparent;
+    animate background { duration: Theme.dur-base; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled && !root.active ? pointer : default;
+        clicked => {
+            if (!root.active) {
+                root.chosen();
+            }
+        }
+    }
+
+    Text {
+        text: root.label;
+        color: root.active ? Theme.text : !root.enabled ? Theme.text-off : Theme.text-secondary;
+        font-size: Theme.font-body;
+        font-weight: root.active && root.bold-when-active ? Theme.weight-medium : Theme.weight-normal;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -308,7 +353,7 @@ component TitleBar inherits Rectangle {
 
         Rectangle {
             width: Theme.title-icon;
-            height: Theme.title-icon-stroke;
+            height: Theme.icon-stroke;
             background: Theme.text-secondary;
         }
     }
@@ -328,7 +373,7 @@ component TitleBar inherits Rectangle {
             viewbox-height: 1;
             commands: "M 0 0 L 1 1 M 1 0 L 0 1";
             stroke: Theme.text-secondary;
-            stroke-width: Theme.title-icon-stroke;
+            stroke-width: Theme.icon-stroke;
         }
     }
 }
@@ -370,6 +415,9 @@ export component AppWindow inherits Window {
     // (X11 and Wayland).
     in property <bool> selection-clipboard: false;
     in-out property <string> conflict-warning;
+    // Why the source, which opens like an encrypted file, cannot be decrypted;
+    // empty for any other source. The Rust side turns it into a warning.
+    in-out property <string> input-reason;
     in-out property <int> password-strength: 0;
     in-out property <string> key-fingerprint;
     in-out property <bool> key-invalid: false;
@@ -401,6 +449,8 @@ export component AppWindow inherits Window {
     callback select-keygen-output-dir();
     callback start-operation();
     callback password-edited();
+    // Any other edit typed into the form.
+    callback form-edited();
     callback clear-form();
     callback copy-fingerprint();
     // The app's own frame (see `own-frame`)
@@ -408,6 +458,12 @@ export component AppWindow inherits Window {
     callback show-window-menu(x: length, y: length);
     callback minimize-window();
     callback close-window();
+
+    // Switches the form to `new-mode`, as a tab or key source does.
+    function choose-mode(new-mode: int) {
+        root.mode = new-mode;
+        root.mode-changed();
+    }
 
     // ── Own frame: background and title bar ─────────────────────────────
     if own-frame: Rectangle {
@@ -495,31 +551,14 @@ export component AppWindow inherits Window {
                     padding: Theme.gap-xs;
                     spacing: Theme.gap-2xs;
 
-                    // ── Password ──
-                    Rectangle {
-                        property <bool> active: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt;
-                        horizontal-stretch: 1;
+                    password-tab := Choice {
+                        label: "Password";
+                        active: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt;
+                        enabled: mode != Mode.recipient-decrypt && !is-working;
+                        bold-when-active: true;
                         border-radius: Theme.radius-md;
-                        background: active ? Theme.accent-muted : (sym-ta.has-hover && sym-ta.enabled) ? Theme.surface-hover : transparent;
-                        animate background { duration: Theme.dur-base; }
-
-                        sym-ta := TouchArea {
-                            enabled: mode != Mode.recipient-decrypt && !is-working;
-                            mouse-cursor: self.enabled ? pointer : default;
-                            clicked => {
-                                root.password-strength = 0;
-                                root.mode = Mode.passphrase-encrypt;
-                                root.mode-changed();
-                            }
-                        }
-
-                        Text {
-                            text: "Password";
-                            color: parent.active ? Theme.text : !sym-ta.enabled ? Theme.text-off : Theme.text-secondary;
-                            font-size: Theme.font-body;
-                            font-weight: parent.active ? Theme.weight-medium : Theme.weight-normal;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        chosen => {
+                            root.choose-mode(Mode.passphrase-encrypt);
                         }
                     }
 
@@ -528,31 +567,14 @@ export component AppWindow inherits Window {
                         background: Theme.border;
                     }
 
-                    // ── Key pair ──
-                    Rectangle {
-                        property <bool> active: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt || mode == Mode.keygen;
-                        horizontal-stretch: 1;
+                    key-pair-tab := Choice {
+                        label: "Key pair";
+                        active: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt || mode == Mode.keygen;
+                        enabled: mode != Mode.passphrase-decrypt && !is-working;
+                        bold-when-active: true;
                         border-radius: Theme.radius-md;
-                        background: active ? Theme.accent-muted : (hyb-ta.has-hover && hyb-ta.enabled) ? Theme.surface-hover : transparent;
-                        animate background { duration: Theme.dur-base; }
-
-                        hyb-ta := TouchArea {
-                            enabled: mode != Mode.passphrase-decrypt && !is-working;
-                            mouse-cursor: self.enabled ? pointer : default;
-                            clicked => {
-                                root.password-strength = 0;
-                                root.mode = Mode.recipient-encrypt;
-                                root.mode-changed();
-                            }
-                        }
-
-                        Text {
-                            text: "Key pair";
-                            color: parent.active ? Theme.text : !hyb-ta.enabled ? Theme.text-off : Theme.text-secondary;
-                            font-size: Theme.font-body;
-                            font-weight: parent.active ? Theme.weight-medium : Theme.weight-normal;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        chosen => {
+                            root.choose-mode(Mode.recipient-encrypt);
                         }
                     }
                 }
@@ -753,28 +775,13 @@ export component AppWindow inherits Window {
                         padding: Theme.gap-2xs;
                         spacing: Theme.gap-2xs;
 
-                        Rectangle {
-                            horizontal-stretch: 1;
+                        existing-key-choice := Choice {
+                            label: "Use existing public key";
+                            active: mode == Mode.recipient-encrypt;
+                            enabled: !is-working;
                             border-radius: Theme.radius-sm;
-                            background: mode == Mode.recipient-encrypt ? Theme.accent-muted : (ek-ta.has-hover && ek-ta.enabled) ? Theme.surface-hover : transparent;
-                            animate background { duration: Theme.dur-base; }
-
-                            ek-ta := TouchArea {
-                                enabled: !is-working;
-                                mouse-cursor: self.enabled ? pointer : default;
-                                clicked => {
-                                    root.password-strength = 0;
-                                    root.mode = Mode.recipient-encrypt;
-                                    root.mode-changed();
-                                }
-                            }
-
-                            Text {
-                                text: "Use existing public key";
-                                color: mode == Mode.recipient-encrypt ? Theme.text : Theme.text-secondary;
-                                font-size: Theme.font-body;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            chosen => {
+                                root.choose-mode(Mode.recipient-encrypt);
                             }
                         }
 
@@ -783,28 +790,13 @@ export component AppWindow inherits Window {
                             background: Theme.border;
                         }
 
-                        Rectangle {
-                            horizontal-stretch: 1;
+                        new-key-choice := Choice {
+                            label: "Create key pair";
+                            active: mode == Mode.keygen;
+                            enabled: !is-working;
                             border-radius: Theme.radius-sm;
-                            background: mode == Mode.keygen ? Theme.accent-muted : (nk-ta.has-hover && nk-ta.enabled) ? Theme.surface-hover : transparent;
-                            animate background { duration: Theme.dur-base; }
-
-                            nk-ta := TouchArea {
-                                enabled: !is-working;
-                                mouse-cursor: self.enabled ? pointer : default;
-                                clicked => {
-                                    root.password-strength = 0;
-                                    root.mode = Mode.keygen;
-                                    root.mode-changed();
-                                }
-                            }
-
-                            Text {
-                                text: "Create key pair";
-                                color: mode == Mode.keygen ? Theme.text : Theme.text-secondary;
-                                font-size: Theme.font-body;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            chosen => {
+                                root.choose-mode(Mode.keygen);
                             }
                         }
                     }
@@ -931,13 +923,18 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text {
-                                    text: fp-copied ? "\u{2713}" : "\u{2398}";
-                                    color: fp-copied ? Theme.success : Theme.text-dim;
-                                    font-size: Theme.font-body;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    animate color { duration: Theme.dur-slow; }
+                                // Drawn rather than taken from a font, which may
+                                // lack the glyph: two overlapping sheets, and a
+                                // tick once the fingerprint is copied.
+                                Path {
+                                    width: Theme.icon;
+                                    height: Theme.icon;
+                                    viewbox-width: 11;
+                                    viewbox-height: 11;
+                                    commands: fp-copied ? "M 1 6 L 4 9 L 10 2" : "M 3.5 3.5 V 0.75 H 10.25 V 7.5 H 7.5 M 0.75 3.5 H 7.5 V 10.25 H 0.75 Z";
+                                    stroke: fp-copied ? Theme.success : Theme.text-dim;
+                                    stroke-width: Theme.icon-stroke;
+                                    animate stroke { duration: Theme.dur-slow; }
                                 }
                             }
                         }
@@ -1063,11 +1060,13 @@ export component AppWindow inherits Window {
                     }
 
                     // Eye icon (toggle password visibility)
-                    Rectangle {
+                    eye := Rectangle {
                         x: parent.width - 32px;
                         y: (parent.height - 14px) / 2;
                         width: 22px;
                         height: 14px;
+
+                        property <color> ink: is-working ? Theme.text-off : Theme.text-dim;
 
                         // Eye outline (oval)
                         Rectangle {
@@ -1077,7 +1076,7 @@ export component AppWindow inherits Window {
                             y: 2px;
                             border-radius: Theme.radius-md;
                             border-width: 1.5px;
-                            border-color: Theme.text-dim;
+                            border-color: eye.ink;
                             background: transparent;
 
                             // Pupil
@@ -1087,7 +1086,7 @@ export component AppWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                                 border-radius: 2.5px;
-                                background: Theme.text-dim;
+                                background: eye.ink;
                             }
                         }
 
@@ -1096,7 +1095,7 @@ export component AppWindow inherits Window {
                             width: 22px;
                             height: 1.5px;
                             y: (parent.height - self.height) / 2;
-                            background: Theme.text-dim;
+                            background: eye.ink;
                         }
                     }
 
@@ -1105,7 +1104,8 @@ export component AppWindow inherits Window {
                         x: parent.width - 38px;
                         width: 38px;
                         height: parent.height;
-                        mouse-cursor: pointer;
+                        enabled: !is-working;
+                        mouse-cursor: self.enabled ? pointer : default;
                         clicked => {
                             root.hide-password = !root.hide-password;
                         }
@@ -1129,6 +1129,7 @@ export component AppWindow inherits Window {
                             height: 2px;
                             border-radius: 1px;
                             background: active && password-strength >= 1 ? strength-color : Theme.surface;
+                            animate background { duration: Theme.dur-slow; }
                         }
 
                         Rectangle {
@@ -1136,6 +1137,7 @@ export component AppWindow inherits Window {
                             height: 2px;
                             border-radius: 1px;
                             background: active && password-strength >= 2 ? strength-color : Theme.surface;
+                            animate background { duration: Theme.dur-slow; }
                         }
 
                         Rectangle {
@@ -1143,6 +1145,7 @@ export component AppWindow inherits Window {
                             height: 2px;
                             border-radius: 1px;
                             background: active && password-strength >= 3 ? strength-color : Theme.surface;
+                            animate background { duration: Theme.dur-slow; }
                         }
 
                         Rectangle {
@@ -1155,10 +1158,13 @@ export component AppWindow inherits Window {
                     }
 
                     Text {
+                        width: Theme.strength-label-w;
                         text: active ? (password-strength == 1 ? "Weak" : password-strength == 2 ? "Fair" : password-strength == 3 ? "Good" : "Strong") : "";
                         color: strength-color;
                         font-size: Theme.font-caption;
+                        horizontal-alignment: right;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
             }
@@ -1210,6 +1216,9 @@ export component AppWindow inherits Window {
                                 root.start-operation();
                             }
                         }
+                        edited => {
+                            root.form-edited();
+                        }
                     }
 
                     if password-repeated == "" && !rpwd-ti.has-focus: Text {
@@ -1237,8 +1246,9 @@ export component AppWindow inherits Window {
         // ── Spacer: pushes bottom section to a fixed position ──
         Rectangle {
             // Keeps the bar off the last field; with flexible gaps, the gaps above
-            // shrink instead.
-            min-height: Theme.flexible-gaps ? Theme.gap-lg : 0px;
+            // shrink instead. With rigid gaps, Create key pair leaves little more
+            // than this, so the bar cannot grow onto the last field.
+            min-height: Theme.flexible-gaps ? Theme.gap-lg : Theme.gap-sm;
             vertical-stretch: 1;
         }
 
@@ -1265,12 +1275,14 @@ export component AppWindow inherits Window {
 
             // Full height, so a single line always has room to render even
             // when the bar is shrunk to its minimum; the padding lives in the
-            // bar's preferred height above.
+            // bar's preferred height above. When the bar cannot show every
+            // line, the text starts at the top: the first line, which says
+            // what went wrong, stays, and the last one shown ends in "…".
             notify-text := Text {
                 x: Theme.field-pad;
                 width: parent.width - 2 * Theme.field-pad;
                 height: parent.height;
-                vertical-alignment: center;
+                vertical-alignment: self.preferred-height > self.height ? TextVerticalAlignment.top : TextVerticalAlignment.center;
                 text: status-err != "" ? status-err : conflict-warning != "" ? conflict-warning : status-ok != "" ? status-ok : show-ready ? "Ready" : "";
                 color: status-err != "" ? Theme.error : conflict-warning != "" ? Theme.warning : Theme.success;
                 font-size: Theme.font-body;

@@ -13,7 +13,7 @@ use ferrocrypt::{
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 #[cfg(feature = "mcp")]
 mod automation;
@@ -29,23 +29,28 @@ mod password_scorer;
 /// after selection cannot change the recipient behind the user's back.
 type SelectedPublicKey = Arc<Mutex<Option<PublicKey>>>;
 
-/// Replaces the retained recipient key. A poisoned lock is recovered:
-/// the slot holds plain data no panic can leave half-written, and
-/// applying every store is what keeps each clearing path effective, so
-/// a retained key can never outlive the fingerprint describing it.
-fn store_selected_public_key(selected: &SelectedPublicKey, key: Option<PublicKey>) {
-    *selected.lock().unwrap_or_else(PoisonError::into_inner) = key;
+/// Locks the retained recipient key. A poisoned lock is recovered: the
+/// slot holds plain data no panic can leave half-written, and applying
+/// every store is what keeps each clearing path effective, so a retained
+/// key can never outlive the fingerprint describing it, and the slot always
+/// holds the last selection or clearing.
+fn lock_selected_public_key(selected: &SelectedPublicKey) -> MutexGuard<'_, Option<PublicKey>> {
+    selected.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Reads the retained recipient key for one operation. Recovers a
-/// poisoned lock for the same reason as [`store_selected_public_key`]:
-/// with every store applied, the slot always holds the last selection
-/// or clearing.
+/// Replaces the retained recipient key.
+fn store_selected_public_key(selected: &SelectedPublicKey, key: Option<PublicKey>) {
+    *lock_selected_public_key(selected) = key;
+}
+
+/// Reads the retained recipient key for one operation.
 fn take_selected_public_key(selected: &SelectedPublicKey) -> Option<PublicKey> {
-    selected
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
+    lock_selected_public_key(selected).clone()
+}
+
+/// Whether a recipient key is retained.
+fn has_selected_public_key(selected: &SelectedPublicKey) -> bool {
+    lock_selected_public_key(selected).is_some()
 }
 
 /// Drops the retained recipient key together with the fingerprint describing
@@ -72,8 +77,26 @@ const STATUS_LINE_MAX: usize = 66;
 /// error keeps the path that says which entry was refused instead of losing
 /// it to a one-line cut. Narrow glyphs can wrap the full budget onto one
 /// more line than this number; every mode that can show an archive-path
-/// error has room for that.
+/// error has room for that. Create key pair has room for less, so there the
+/// bar shows the first lines and ends the last one shown in "…".
 const STATUS_ERROR_LINES: usize = 3;
+
+/// Character budget for an error or a warning in the status bar.
+const STATUS_ERROR_BUDGET: usize = STATUS_LINE_MAX * STATUS_ERROR_LINES;
+
+/// Ends the warning about a source that opens like an encrypted file but
+/// cannot be decrypted.
+const ORDINARY_FILE_NOTE: &str = "; encrypting treats it as an ordinary file";
+
+/// Ends that warning instead when the encrypted file would take the source's
+/// own name, which is taken.
+const OWN_NAME_NOTE: &str = "; to encrypt it as an ordinary file, choose another name";
+
+// Each note is ASCII, so its length in bytes is its length in characters, and
+// leaves room for a reason before it.
+const _: () =
+    assert!(ORDINARY_FILE_NOTE.is_ascii() && ORDINARY_FILE_NOTE.len() < STATUS_ERROR_BUDGET);
+const _: () = assert!(OWN_NAME_NOTE.is_ascii() && OWN_NAME_NOTE.len() < STATUS_ERROR_BUDGET);
 
 // Slint app modes — must match the `mode` property values in app.slint
 const MODE_PASSPHRASE_ENCRYPT: i32 = 0;
@@ -194,7 +217,7 @@ fn run_operation(
                 )
                 .map(|o| o.output_path),
             Ok(Decryptor::Passphrase(_)) => Err(CryptoError::InvalidInput(
-                "This file is sealed with a passphrase; switch to the 'Password' tab".to_string(),
+                "This file is sealed with a password; switch to the 'Password' tab".to_string(),
             )),
             Ok(_) => Err(CryptoError::InvalidInput(
                 "Unsupported FerroCrypt encryption mode for the 'Key pair' tab".to_string(),
@@ -375,6 +398,7 @@ fn main() {
                     app.set_key_path_display(elide_path(&key_path, ELIDE).into());
                     app.set_key_path(key_path.clone().into());
                     validate_selected_key(app, &key_path, &selected_public_key);
+                    clear_stale_status(app);
                     check_conflicts(app);
                 },
             );
@@ -390,6 +414,7 @@ fn main() {
                 |dialog| dialog.pick_folder(),
                 |app, path| {
                     update_output_path(app, &path_to_string(&path));
+                    clear_stale_status(app);
                 },
             );
         }
@@ -415,7 +440,10 @@ fn main() {
                     }
                     dialog.save_file()
                 },
-                |app, path| update_output_path(app, &path_to_string(&path)),
+                |app, path| {
+                    update_output_path(app, &path_to_string(&path));
+                    clear_stale_status(app);
+                },
             );
         }
     });
@@ -431,6 +459,7 @@ fn main() {
                     let dir = path_to_string(&path);
                     app.set_keygen_output_dir_display(elide_path(&dir, ELIDE).into());
                     app.set_keygen_output_dir(dir.into());
+                    clear_stale_status(app);
                     check_conflicts(app);
                 },
             );
@@ -444,6 +473,16 @@ fn main() {
                 app.set_password_strength(password_scorer::password_strength(
                     app.get_password().as_str(),
                 ));
+                clear_stale_status(&app);
+            }
+        }
+    });
+
+    app.on_form_edited({
+        let weak = app.as_weak();
+        move || {
+            if let Some(app) = weak.upgrade() {
+                clear_stale_status(&app);
             }
         }
     });
@@ -556,7 +595,14 @@ fn main() {
                                         "Key pair generated \u{2014} public key selected".into(),
                                     );
                                 } else {
-                                    clear_fields(&app, &selected_public_key);
+                                    // Keeping the recipient lets more files go to
+                                    // the same key.
+                                    if mode == MODE_RECIPIENT_ENCRYPT {
+                                        clear_all_but_key(&app);
+                                    } else {
+                                        clear_fields(&app, &selected_public_key);
+                                    }
+
                                     let action = if is_decrypt {
                                         "Decrypted to"
                                     } else {
@@ -571,6 +617,10 @@ fn main() {
                                 app.set_status_err(elide_error_for_status(&e.to_string()).into());
                             }
                         }
+
+                        // Starting cleared the warnings; bring back those
+                        // that still hold.
+                        check_conflicts(&app);
                     });
                 }));
 
@@ -582,6 +632,7 @@ fn main() {
                             app.set_status_err(
                                 "Operation failed unexpectedly (internal error)".into(),
                             );
+                            check_conflicts(&app);
                         }
                     });
                 }
@@ -650,21 +701,31 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
             }
         });
 
-    let detected_mode = match detect_mode_from_path(&selected) {
-        Ok(mode) => mode,
-        Err(e) => {
-            // The chosen file could not be read (a damaged encrypted file, or
-            // one we cannot open). Clear whatever was selected before, so a
-            // failed pick never leaves the previous file ready to run. With no
-            // input selected the Start button turns itself off.
+    let (detected_mode, input_reason) = match detect_mode_from_path(&selected) {
+        Ok(mode) => (mode, String::new()),
+        Err(e @ (CryptoError::Io(_) | CryptoError::InputPath | CryptoError::InvalidInput(_))) => {
+            // The path could not be read, or is not a file or folder. Clear
+            // whatever was selected before, so a failed pick never leaves the
+            // previous file ready to run. With no input selected the Start
+            // button turns itself off.
             app.set_status_err(elide_error_for_status(&e.to_string()).into());
             app.set_input_path(Default::default());
             app.set_input_path_display(Default::default());
+            app.set_input_reason(Default::default());
             app.set_output_path(Default::default());
             app.set_output_path_display(Default::default());
             check_conflicts(app);
             return;
         }
+        // The file opens like an encrypted file but cannot be decrypted here:
+        // damaged, from a newer FerroCrypt, over this app's limits, or an
+        // ordinary file that happens to start with the same bytes. It can
+        // still be encrypted, which reads it as opaque bytes and trusts
+        // nothing in it, but never without a warning that says why, so an
+        // encrypted file is not encrypted again unnoticed. A private key
+        // needs no warning: encrypting it is an ordinary thing to do.
+        Err(_) if validate_private_key_file(Path::new(&selected)).is_ok() => (None, String::new()),
+        Err(e) => (None, e.to_string()),
     };
     let is_decrypt = detected_mode.is_some_and(is_decrypt_mode);
 
@@ -675,9 +736,11 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
     };
     app.set_input_path_display(elide_path(&selected, inpath_elide).into());
     app.set_input_path(selected.clone().into());
+    app.set_input_reason(input_reason.into());
     let old_mode = app.get_mode();
     let new_mode = next_mode(old_mode, detected_mode);
-    if new_mode != old_mode {
+    let mode_changed = new_mode != old_mode;
+    if mode_changed {
         app.set_mode(new_mode);
         app.set_password(Default::default());
         app.set_password_repeated(Default::default());
@@ -685,8 +748,14 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
         app.set_password_strength(password_scorer::PW_EMPTY);
     }
 
+    // The key file is checked again for the new source, except for a valid
+    // public key in an unchanged mode: that one stays as read when it was
+    // selected, so the key whose fingerprint is on screen is the one used.
     let keypath = app.get_key_path().to_string();
-    if !keypath.is_empty() {
+    let keeps_public_key = !mode_changed
+        && new_mode == MODE_RECIPIENT_ENCRYPT
+        && has_selected_public_key(selected_public_key);
+    if !keypath.is_empty() && !keeps_public_key {
         validate_selected_key(app, &keypath, selected_public_key);
     }
 
@@ -694,13 +763,31 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
         update_output_path(app, &dir);
     } else if let Ok(filename) = default_encrypted_filename(&selected) {
         update_output_path(app, &path_to_string(&Path::new(&dir).join(filename)));
+    } else {
+        // No output name follows from this source, so none from the last one
+        // may stay.
+        update_output_path(app, "");
     }
 
+    clear_stale_status(app);
+}
+
+/// The warning for a source that opens like an encrypted file but cannot be
+/// decrypted, for the `reason` given, ending in `note`. A long `reason` is
+/// cut, so the note always fits.
+fn source_warning(reason: &str, note: &str) -> String {
+    let budget = STATUS_ERROR_BUDGET - note.chars().count();
+    format!("{}{note}", elide_end(reason, budget))
+}
+
+/// Clears the last operation's result once the user changes the form. An
+/// error about the selected key stays: it still applies, and it is what
+/// explains the disabled action button.
+fn clear_stale_status(app: &AppWindow) {
     if !app.get_key_invalid() {
-        app.set_status_ok("".into());
-        app.set_status_err("".into());
+        app.set_status_ok(Default::default());
+        app.set_status_err(Default::default());
     }
-    check_conflicts(app);
 }
 
 fn update_output_path(app: &AppWindow, path: &str) {
@@ -715,6 +802,7 @@ fn check_conflicts(app: &AppWindow) {
     let keygen_dir = app.get_keygen_output_dir().to_string();
 
     let out_exists = is_encrypt_mode(mode) && !outpath.is_empty() && Path::new(&outpath).exists();
+    let output_is_source = !outpath.is_empty() && app.get_input_path() == outpath.as_str();
     let (secret_exists, pub_exists) = if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
         (
             private_key_path(&keygen_dir).exists(),
@@ -726,37 +814,73 @@ fn check_conflicts(app: &AppWindow) {
 
     let warning = compute_conflict_warning(
         mode,
+        &app.get_input_reason(),
         &outpath,
         &keygen_dir,
-        out_exists,
-        secret_exists,
-        pub_exists,
+        OutputFacts {
+            out_exists,
+            secret_exists,
+            pub_exists,
+            output_is_source,
+        },
     );
     app.set_conflict_warning(warning.into());
 }
 
-/// Pure conflict-detection logic: given the current UI mode, resolved output
-/// paths, and the filesystem existence of each, return the warning string to
-/// display (or empty string when there is no conflict).
+/// What the filesystem says about the chosen outputs.
+#[derive(Default)]
+struct OutputFacts {
+    /// The encrypted file's path is taken.
+    out_exists: bool,
+    /// The key pair folder holds a `private.key`.
+    secret_exists: bool,
+    /// The key pair folder holds a `public.key`.
+    pub_exists: bool,
+    /// The encrypted file's path is the source's own.
+    output_is_source: bool,
+}
+
+/// Pure conflict-detection logic: given the current UI mode, why the selected
+/// source cannot be decrypted (empty if it can, or is no encrypted file),
+/// resolved output paths, and what the filesystem says about them, return the
+/// warning string to display (or empty string when there is no conflict).
+///
+/// A name clash comes first: an operation cannot succeed while it lasts, so
+/// the source warning is on screen whenever encryption can. A source whose
+/// output would take its own name, such as a damaged `x.fcr`, gets one
+/// warning for both: why it cannot be decrypted, and that another name is
+/// needed.
 fn compute_conflict_warning(
     mode: i32,
+    input_reason: &str,
     outpath: &str,
     keygen_dir: &str,
-    out_exists: bool,
-    secret_exists: bool,
-    pub_exists: bool,
+    facts: OutputFacts,
 ) -> String {
-    if is_encrypt_mode(mode) && !outpath.is_empty() && out_exists {
+    if is_encrypt_mode(mode) && !outpath.is_empty() && facts.out_exists {
+        if facts.output_is_source && !input_reason.is_empty() {
+            return source_warning(input_reason, OWN_NAME_NOTE);
+        }
+
         return elide_path_message("Already exists: ", &escape_path_for_display(outpath), "");
     }
+
     if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
-        return match (secret_exists, pub_exists) {
-            (true, true) => "Key pair already exists in output folder".into(),
-            (true, false) => "Private key already exists in output folder".into(),
-            (false, true) => "Public key already exists in output folder".into(),
-            _ => String::new(),
+        let clash = match (facts.secret_exists, facts.pub_exists) {
+            (true, true) => Some("Key pair already exists in output folder"),
+            (true, false) => Some("Private key already exists in output folder"),
+            (false, true) => Some("Public key already exists in output folder"),
+            (false, false) => None,
         };
+        if let Some(clash) = clash {
+            return clash.into();
+        }
     }
+
+    if is_encrypt_mode(mode) && !input_reason.is_empty() {
+        return source_warning(input_reason, ORDINARY_FILE_NOTE);
+    }
+
     String::new()
 }
 
@@ -766,15 +890,30 @@ fn compute_conflict_warning(
 /// keeps the one invariant the key selection rests on: a retained key exists
 /// only while the fingerprint describing it is on screen.
 fn clear_fields(app: &AppWindow, selected_public_key: &SelectedPublicKey) {
+    clear_all_but_key(app);
+    app.set_key_path(Default::default());
+    app.set_key_path_display(Default::default());
+    forget_selected_key(app, selected_public_key);
+    app.set_key_invalid(false);
+
+    let current = app.get_mode();
+    let snapped = snap_back_mode(current);
+    if snapped != current {
+        app.set_mode(snapped);
+    }
+}
+
+/// Resets every field but the key file, whose retained key and fingerprint
+/// stay with it.
+fn clear_all_but_key(app: &AppWindow) {
     let empty = slint::SharedString::default();
     app.set_input_path(empty.clone());
     app.set_input_path_display(empty.clone());
+    app.set_input_reason(empty.clone());
     app.set_output_path(empty.clone());
     app.set_output_path_display(empty.clone());
     app.set_password(empty.clone());
     app.set_password_repeated(empty.clone());
-    app.set_key_path(empty.clone());
-    app.set_key_path_display(empty.clone());
     app.set_keygen_output_dir(empty.clone());
     app.set_keygen_output_dir_display(empty.clone());
     app.set_conflict_warning(empty.clone());
@@ -782,13 +921,6 @@ fn clear_fields(app: &AppWindow, selected_public_key: &SelectedPublicKey) {
     app.set_status_err(empty);
     app.set_hide_password(true);
     app.set_password_strength(password_scorer::PW_EMPTY);
-    forget_selected_key(app, selected_public_key);
-    app.set_key_invalid(false);
-    let current = app.get_mode();
-    let snapped = snap_back_mode(current);
-    if snapped != current {
-        app.set_mode(snapped);
-    }
 }
 
 fn public_key_path(dir: &str) -> PathBuf {
@@ -885,17 +1017,23 @@ fn elide_result_path(msg: &str) -> String {
 }
 
 /// Bounds an error message to the status bar's wrapped budget,
-/// [`STATUS_LINE_MAX`] times [`STATUS_ERROR_LINES`] characters. A message
-/// longer than that — a long OS error string, or a conflict on a very long
-/// path — is truncated with a trailing `…`. This is UI-only: the library
-/// keeps the full message for CLI and library callers.
+/// [`STATUS_ERROR_BUDGET`] characters. A message longer than that — a long
+/// OS error string, or a conflict on a very long path — is truncated with a
+/// trailing `…`. This is UI-only: the library keeps the full message for CLI
+/// and library callers.
 fn elide_error_for_status(msg: &str) -> String {
-    const BUDGET: usize = STATUS_LINE_MAX * STATUS_ERROR_LINES;
+    elide_end(msg, STATUS_ERROR_BUDGET)
+}
+
+/// Trims `msg` and cuts it to at most `max` chars, ending a cut one with `…`.
+/// `max` must be at least 1.
+fn elide_end(msg: &str, max: usize) -> String {
     let msg = msg.trim();
-    if msg.chars().count() <= BUDGET {
+    if msg.chars().count() <= max {
         return msg.to_string();
     }
-    let kept: String = msg.chars().take(BUDGET - 1).collect();
+
+    let kept: String = msg.chars().take(max - 1).collect();
     format!("{kept}\u{2026}")
 }
 
@@ -946,7 +1084,9 @@ fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoEr
     match probe_recipient_mode(Path::new(path))? {
         Some(UnauthenticatedRecipientMode::Passphrase) => Ok(Some(MODE_PASSPHRASE_DECRYPT)),
         Some(UnauthenticatedRecipientMode::PublicKey) => Ok(Some(MODE_RECIPIENT_DECRYPT)),
-        Some(_) => Ok(None),
+        // An encrypted file of a mode this app does not know is one it cannot
+        // decrypt, and must not pass for an ordinary file.
+        Some(_) => Err(CryptoError::NoSupportedRecipient),
         None => Ok(None),
     }
 }
@@ -1077,7 +1217,7 @@ mod tests {
         let e2 = run(MODE_RECIPIENT_DECRYPT, &pw_fcr, &x2, &priv_key)
             .expect_err("recipient path must reject a passphrase file");
         assert!(
-            matches!(&e2, CryptoError::InvalidInput(m) if m.contains("sealed with a passphrase")),
+            matches!(&e2, CryptoError::InvalidInput(m) if m.contains("sealed with a password")),
             "unexpected error: {e2:?}"
         );
     }
@@ -1473,9 +1613,25 @@ mod tests {
         );
     }
 
+    /// Filesystem facts about a source that is not its own output.
+    fn facts(out_exists: bool, secret_exists: bool, pub_exists: bool) -> OutputFacts {
+        OutputFacts {
+            out_exists,
+            secret_exists,
+            pub_exists,
+            ..OutputFacts::default()
+        }
+    }
+
     #[test]
     fn conflict_warning_empty_when_no_output_path() {
-        let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, "", "", false, false, false);
+        let w = compute_conflict_warning(
+            MODE_PASSPHRASE_ENCRYPT,
+            "",
+            "",
+            "",
+            facts(false, false, false),
+        );
         assert!(w.is_empty());
     }
 
@@ -1483,11 +1639,10 @@ mod tests {
     fn conflict_warning_empty_when_encrypt_output_missing() {
         let w = compute_conflict_warning(
             MODE_RECIPIENT_ENCRYPT,
+            "",
             "/tmp/out.fcr",
             "",
-            false,
-            false,
-            false,
+            facts(false, false, false),
         );
         assert!(w.is_empty());
     }
@@ -1496,21 +1651,19 @@ mod tests {
     fn conflict_warning_flags_existing_encrypt_output() {
         let w = compute_conflict_warning(
             MODE_PASSPHRASE_ENCRYPT,
+            "",
             "/tmp/out.fcr",
             "",
-            true,
-            false,
-            false,
+            facts(true, false, false),
         );
         assert_eq!(w, "Already exists: /tmp/out.fcr");
 
         let w = compute_conflict_warning(
             MODE_RECIPIENT_ENCRYPT,
+            "",
             "/tmp/out.fcr",
             "",
-            true,
-            false,
-            false,
+            facts(true, false, false),
         );
         assert_eq!(w, "Already exists: /tmp/out.fcr");
     }
@@ -1521,7 +1674,7 @@ mod tests {
         // atomic output handling is authoritative, and the output path in
         // decrypt mode is a directory.
         for mode in [MODE_PASSPHRASE_DECRYPT, MODE_RECIPIENT_DECRYPT] {
-            let w = compute_conflict_warning(mode, "/tmp/out", "", true, false, false);
+            let w = compute_conflict_warning(mode, "", "/tmp/out", "", facts(true, false, false));
             assert!(w.is_empty(), "mode {} unexpectedly warned", mode);
         }
     }
@@ -1529,7 +1682,13 @@ mod tests {
     #[test]
     fn conflict_warning_elides_long_encrypt_paths() {
         let long = format!("/tmp/{}", "a".repeat(80));
-        let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, &long, "", true, false, false);
+        let w = compute_conflict_warning(
+            MODE_PASSPHRASE_ENCRYPT,
+            "",
+            &long,
+            "",
+            facts(true, false, false),
+        );
         assert!(w.starts_with("Already exists: \u{2026}"), "got: {}", w);
         assert!(w.chars().count() <= STATUS_LINE_MAX, "got: {w}");
     }
@@ -1543,15 +1702,67 @@ mod tests {
             (false, false, ""),
         ];
         for (sec, pubk, expected) in cases {
-            let w = compute_conflict_warning(MODE_KEYGEN, "", "/tmp/keys", false, sec, pubk);
+            let w =
+                compute_conflict_warning(MODE_KEYGEN, "", "", "/tmp/keys", facts(false, sec, pubk));
             assert_eq!(w, expected, "sec={sec} pub={pubk}");
+        }
+    }
+
+    /// A warning about the source shows in both encrypt modes once no name
+    /// clashes, or when the clash is with the source itself, and nowhere
+    /// else: the other modes do not encrypt it.
+    #[test]
+    fn conflict_warning_shows_the_source_warning_in_encrypt_modes_after_a_clash() {
+        let reason = "File is too short";
+        let source = source_warning(reason, ORDINARY_FILE_NOTE);
+
+        for mode in [MODE_PASSPHRASE_ENCRYPT, MODE_RECIPIENT_ENCRYPT] {
+            let w = compute_conflict_warning(
+                mode,
+                reason,
+                "/tmp/out.fcr",
+                "",
+                facts(true, false, false),
+            );
+            assert_eq!(w, "Already exists: /tmp/out.fcr", "mode {mode}");
+
+            let w = compute_conflict_warning(
+                mode,
+                reason,
+                "/tmp/out.fcr",
+                "",
+                facts(false, false, false),
+            );
+            assert_eq!(w, source, "mode {mode}");
+
+            let w = compute_conflict_warning(
+                mode,
+                reason,
+                "/tmp/out.fcr",
+                "",
+                OutputFacts {
+                    output_is_source: true,
+                    ..facts(true, false, false)
+                },
+            );
+            assert_eq!(
+                w,
+                source_warning(reason, OWN_NAME_NOTE),
+                "mode {mode}: the clash with the source's own name"
+            );
+        }
+
+        for mode in [MODE_PASSPHRASE_DECRYPT, MODE_RECIPIENT_DECRYPT, MODE_KEYGEN] {
+            let w =
+                compute_conflict_warning(mode, reason, "/tmp/out", "", facts(true, false, false));
+            assert!(w.is_empty(), "mode {mode} showed the source warning");
         }
     }
 
     #[test]
     fn conflict_warning_keygen_empty_dir_never_warns() {
         for (sec, pubk) in [(true, true), (true, false), (false, true), (false, false)] {
-            let w = compute_conflict_warning(MODE_KEYGEN, "", "", false, sec, pubk);
+            let w = compute_conflict_warning(MODE_KEYGEN, "", "", "", facts(false, sec, pubk));
             assert!(w.is_empty());
         }
     }
@@ -1617,10 +1828,7 @@ mod tests {
 
         let out = elide_error_for_status(&msg);
 
-        assert!(
-            out.chars().count() <= STATUS_LINE_MAX * STATUS_ERROR_LINES,
-            "got: {out}"
-        );
+        assert!(out.chars().count() <= STATUS_ERROR_BUDGET, "got: {out}");
         assert!(
             out.contains("Output report.pdf is complete"),
             "the trim must keep the output's name, got: {out}"
@@ -1695,7 +1903,7 @@ mod tests {
     fn elide_error_for_status_truncates_past_the_wrapped_budget() {
         let long = format!("Output already exists: /tmp/{}", "e".repeat(300));
         let out = elide_error_for_status(&long);
-        assert_eq!(out.chars().count(), STATUS_LINE_MAX * STATUS_ERROR_LINES);
+        assert_eq!(out.chars().count(), STATUS_ERROR_BUDGET);
         assert!(out.ends_with('\u{2026}'));
         assert!(out.starts_with("Output already exists: /tmp/"));
     }
@@ -1726,11 +1934,10 @@ mod tests {
 
         let w = compute_conflict_warning(
             MODE_PASSPHRASE_ENCRYPT,
+            "",
             "/tmp/a\nb.fcr",
             "",
-            true,
-            false,
-            false,
+            facts(true, false, false),
         );
         assert_eq!(w, "Already exists: /tmp/a\\nb.fcr");
     }
@@ -1973,7 +2180,7 @@ mod tests {
             let element = |id: &str| ElementHandle::find_by_element_id(&app, id).next();
 
             const WORD: &str = "word ";
-            let long_error = WORD.repeat(STATUS_LINE_MAX * STATUS_ERROR_LINES / WORD.len());
+            let long_error = WORD.repeat(STATUS_ERROR_BUDGET / WORD.len());
             let mut button_tops = Vec::new();
             let mut bar_grew = false;
             for (mode, fingerprint) in FORMS {
@@ -2033,6 +2240,224 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Generates a key pair in `dir` with fast Argon2id and returns the path
+    /// of its public key.
+    fn generate_test_key_pair(dir: &Path) -> PathBuf {
+        run_operation(
+            Operation {
+                mode: MODE_KEYGEN,
+                input: Path::new(""),
+                output_dir: dir,
+                save_as: None,
+                key_path: Path::new(""),
+                public_key: None,
+                kdf_params: Some(fast_kdf_params()),
+            },
+            Passphrase::new("desktop-test-key-passphrase"),
+            &|_: &ProgressEvent| {},
+        )
+        .expect("keygen")
+    }
+
+    /// A file that opens like an encrypted file but cannot be decrypted
+    /// here stays selected for encryption, with a warning that gives the
+    /// reason, whether it is a look-alike or an encrypted file over this
+    /// app's limits. A private key and an ordinary file carry no warning, and
+    /// only a path that cannot be read is refused.
+    #[test]
+    fn a_source_that_cannot_be_decrypted_is_kept_with_a_warning() {
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let lookalike = dir.path().join("lookalike.txt");
+        fs::write(&lookalike, b"FCR\0").unwrap();
+        // A sound prefix declaring a 2 MiB header, over the 1 MiB default.
+        let oversized = dir.path().join("oversized.bin");
+        fs::write(&oversized, b"FCR\0\x01E\0\0\0\x20\0\0").unwrap();
+        assert!(
+            matches!(
+                detect_mode_from_path(oversized.to_str().unwrap()),
+                Err(CryptoError::HeaderLenCapExceeded { .. })
+            ),
+            "the file must be over the header cap for this test to prove anything"
+        );
+
+        let ordinary = dir.path().join("ordinary.txt");
+        fs::write(&ordinary, b"plain text").unwrap();
+
+        let keys = dir.path().join("keys");
+        generate_test_key_pair(&keys);
+        let private_key = keys.join(PRIVATE_KEY_FILENAME);
+
+        let missing = dir.path().join("missing.txt");
+        let selected: SelectedPublicKey = Arc::new(Mutex::new(None));
+        let app = headless_app();
+
+        for (source, reason) in [
+            (&lookalike, "File is too short"),
+            (&oversized, "Header too large"),
+        ] {
+            app.set_mode(MODE_PASSPHRASE_DECRYPT);
+            apply_input_path(&app, source.clone(), &selected);
+            assert_eq!(app.get_input_path(), path_to_string(source));
+            assert_eq!(app.get_mode(), MODE_PASSPHRASE_ENCRYPT);
+            assert_eq!(app.get_status_err(), "");
+            let warning = app.get_conflict_warning();
+            assert!(
+                app.get_input_reason().starts_with(reason)
+                    && warning.starts_with(reason)
+                    && warning.ends_with(ORDINARY_FILE_NOTE),
+                "got: {warning}"
+            );
+        }
+
+        for source in [&private_key, &ordinary] {
+            apply_input_path(&app, source.clone(), &selected);
+            assert_eq!(app.get_input_path(), path_to_string(source));
+            assert_eq!(app.get_input_reason(), "", "{source:?} warned");
+            assert_eq!(app.get_conflict_warning(), "");
+        }
+
+        apply_input_path(&app, lookalike, &selected);
+        apply_input_path(&app, missing, &selected);
+        assert_eq!(app.get_input_path(), "");
+        assert_eq!(app.get_input_reason(), "");
+        assert_ne!(app.get_status_err(), "", "the refusal is not shown");
+    }
+
+    /// However long the reason, the warning for a source that cannot be
+    /// decrypted still ends in its note.
+    #[test]
+    fn the_note_survives_a_long_reason() {
+        let reason = "reason ".repeat(STATUS_ERROR_BUDGET);
+        for note in [ORDINARY_FILE_NOTE, OWN_NAME_NOTE] {
+            let warning = source_warning(&reason, note);
+            assert!(warning.ends_with(note), "got: {warning}");
+            assert_eq!(warning.chars().count(), STATUS_ERROR_BUDGET);
+        }
+    }
+
+    /// Picking a new source in the same mode keeps the public key read when
+    /// it was selected, even after its file changes: the fingerprint on
+    /// screen and the key the next encryption uses stay the same. A key that
+    /// failed, and a private key, are read again.
+    #[test]
+    fn a_new_source_keeps_the_key_read_at_selection() {
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let key_a = generate_test_key_pair(&dir.path().join("a"));
+        let key_b = generate_test_key_pair(&dir.path().join("b"));
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"plain text").unwrap();
+        let selected: SelectedPublicKey = Arc::new(Mutex::new(None));
+
+        let app = headless_app();
+        app.set_mode(MODE_RECIPIENT_ENCRYPT);
+        app.set_key_path(path_to_string(&key_a).into());
+        validate_selected_key(&app, &path_to_string(&key_a), &selected);
+        let fingerprint = app.get_key_fingerprint();
+        assert_ne!(fingerprint, "");
+
+        fs::copy(&key_b, &key_a).unwrap();
+        apply_input_path(&app, source, &selected);
+        assert_eq!(app.get_key_fingerprint(), fingerprint);
+        assert!(!app.get_key_invalid());
+        let kept = take_selected_public_key(&selected).expect("the key is kept");
+        assert_eq!(kept.fingerprint().unwrap(), fingerprint.as_str());
+
+        // A key that failed is read again, so a fixed file is picked up.
+        fs::write(&key_a, b"not a key").unwrap();
+        validate_selected_key(&app, &path_to_string(&key_a), &selected);
+        assert!(app.get_key_invalid());
+        fs::copy(&key_b, &key_a).unwrap();
+        apply_input_path(&app, dir.path().join("source.txt"), &selected);
+        assert!(!app.get_key_invalid(), "the fixed key was not read again");
+        assert_ne!(app.get_key_fingerprint(), "");
+
+        // A private key is checked again on every pick, so a key damaged
+        // since it was chosen is reported before a password is typed.
+        let sealed = run_operation(
+            Operation {
+                mode: MODE_RECIPIENT_ENCRYPT,
+                input: &dir.path().join("source.txt"),
+                output_dir: dir.path(),
+                save_as: None,
+                key_path: Path::new(""),
+                public_key: Some(PublicKey::from_key_file(&key_b).unwrap()),
+                kdf_params: None,
+            },
+            Passphrase::new("unused"),
+            &|_: &ProgressEvent| {},
+        )
+        .expect("recipient encrypt");
+        let private_key = dir.path().join("b").join(PRIVATE_KEY_FILENAME);
+        app.set_mode(MODE_RECIPIENT_DECRYPT);
+        app.set_key_path(path_to_string(&private_key).into());
+        validate_selected_key(&app, &path_to_string(&private_key), &selected);
+        assert!(!app.get_key_invalid());
+
+        fs::write(&private_key, b"damaged").unwrap();
+        apply_input_path(&app, sealed, &selected);
+        assert_eq!(app.get_mode(), MODE_RECIPIENT_DECRYPT);
+        assert!(
+            app.get_key_invalid(),
+            "the damaged private key was not reported"
+        );
+    }
+
+    /// A click on the active tab, or on the active key source, changes
+    /// nothing, so a decrypt form stays a decrypt form and the passwords
+    /// typed for a new key pair stay. A click on the other tab still
+    /// switches, which shows the clicks land. The two tabs, and the two key
+    /// sources, are equally wide whichever is active.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn a_click_on_the_active_choice_changes_nothing() {
+        let app = headless_app();
+        app.show().unwrap();
+        let width = |id: &str| {
+            ElementHandle::find_by_element_id(&app, id)
+                .next()
+                .unwrap_or_else(|| panic!("no element {id}"))
+                .size()
+                .width
+        };
+
+        for (mode, active) in [
+            (MODE_PASSPHRASE_ENCRYPT, "AppWindow::password-tab"),
+            (MODE_PASSPHRASE_DECRYPT, "AppWindow::password-tab"),
+            (MODE_RECIPIENT_ENCRYPT, "AppWindow::key-pair-tab"),
+            (MODE_RECIPIENT_DECRYPT, "AppWindow::key-pair-tab"),
+            (MODE_RECIPIENT_ENCRYPT, "AppWindow::existing-key-choice"),
+            (MODE_KEYGEN, "AppWindow::key-pair-tab"),
+            (MODE_KEYGEN, "AppWindow::new-key-choice"),
+        ] {
+            app.set_mode(mode);
+            click(&app, active, PointerEventButton::Left);
+            assert_eq!(app.get_mode(), mode, "a click on {active} changed the mode");
+            assert_eq!(
+                width("AppWindow::password-tab"),
+                width("AppWindow::key-pair-tab"),
+                "mode {mode}: the tabs differ in width"
+            );
+            if matches!(mode, MODE_RECIPIENT_ENCRYPT | MODE_KEYGEN) {
+                assert_eq!(
+                    width("AppWindow::existing-key-choice"),
+                    width("AppWindow::new-key-choice"),
+                    "mode {mode}: the key sources differ in width"
+                );
+            }
+        }
+
+        app.set_mode(MODE_PASSPHRASE_ENCRYPT);
+        click(&app, "AppWindow::key-pair-tab", PointerEventButton::Left);
+        assert_eq!(
+            app.get_mode(),
+            MODE_RECIPIENT_ENCRYPT,
+            "the other tab did not switch"
+        );
     }
 
     /// The centre of the element `id`, in window coordinates.

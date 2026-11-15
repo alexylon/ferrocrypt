@@ -15,6 +15,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+#[cfg(feature = "mcp")]
+mod automation;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 mod own_frame;
 mod password_scorer;
@@ -255,6 +257,11 @@ fn open_dialog<F>(
 ) where
     F: Future<Output = Option<rfd::FileHandle>> + 'static,
 {
+    #[cfg(feature = "mcp")]
+    let Some(on_pick) = automation::answer_dialog(app, on_pick) else {
+        return;
+    };
+
     let chosen = open(FileDialog::new());
     let weak = app.as_weak();
     // Fails only without a running event loop, and UI callbacks run inside one.
@@ -275,6 +282,11 @@ fn open_dialog(
     open: impl FnOnce(FileDialog) -> Option<PathBuf>,
     on_pick: impl FnOnce(&AppWindow, PathBuf),
 ) {
+    #[cfg(feature = "mcp")]
+    let Some(on_pick) = automation::answer_dialog(app, on_pick) else {
+        return;
+    };
+
     if let Some(path) = open(FileDialog::new()) {
         on_pick(app, path);
     }

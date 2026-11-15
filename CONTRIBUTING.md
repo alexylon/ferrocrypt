@@ -66,6 +66,8 @@ If you changed desktop behavior, also manually verify the important user flows:
 - key generation
 - key validation / fingerprint display
 
+An agent or a script can drive these flows too: `scripts/desktop_mcp.py run` starts a development build with Slint's MCP server on, and `scripts/desktop_mcp.py` lists the commands that click, type, choose files, and take screenshots.
+
 ### Documentation-only changes
 
 In general, doc-only changes do not require code build/test steps.

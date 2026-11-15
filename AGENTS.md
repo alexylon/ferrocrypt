@@ -15,6 +15,12 @@ cd ferrocrypt-desktop && cargo build
 cd ferrocrypt-desktop && cargo run       # launch GUI
 cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings
 
+# Desktop app an agent can see and drive (debug build, `mcp` feature): Slint's
+# MCP server on port 7992, file dialogs answered by `pick`. Run the script
+# without arguments for its commands (pick, shot, tree, status, click, type, call).
+scripts/desktop_mcp.py run               # add --headless for no window on screen
+scripts/desktop_mcp.py pick ~/note.txt && scripts/desktop_mcp.py click Choose 1
+
 # Run specific tests
 cargo test test_name -- --test-threads=1     # single test by name
 cargo test "output_file" -- --test-threads=1 # filter by substring
@@ -172,6 +178,7 @@ A candidate that unwraps but fails the header MAC surfaces as `HeaderTampered` (
 - `src/main.rs` — Rust backend: file dialog callbacks, mode auto-detection via magic bytes, threaded crypto operations with progress updates via `slint::invoke_from_event_loop`. The worker thread's crypto dispatch is the free function `run_operation` (takes an `Operation` value); keeping it out of the UI closure lets the test drive all five modes plus the cross-mode rejections without the event loop. The recipient key read when the user selected it is retained in a `SelectedPublicKey` shared slot and passed into `Operation`, so the encryption uses the key whose fingerprint is on screen; every other selection outcome clears the slot and recipient encrypt refuses without one.
 - `src/own_frame.rs` — Unix systems other than Apple's (Linux and the BSDs). Where the system draws no window frame (a Wayland compositor without server-side decorations, such as GNOME), the app sets `own-frame` in `ui/app.slint` and draws its own title bar and rounded corners. This module asks the compositor before the window is created, corrects the choice once the window exists (X11, a renderer without transparency, or a frame winit draws after all), and connects the title bar to the window. macOS, Windows, KDE, and X11 keep the system frame.
 - `src/password_scorer.rs` — Password strength scoring (0–4 scale) adapted from Proton Pass.
+- `src/automation.rs` — Compiled only with the development `mcp` feature, which also turns on Slint's built-in MCP server and refuses release builds. A native file dialog is outside the window the server can drive, so while `FERROCRYPT_DESKTOP_DIALOG_ANSWER` names a file, `open_dialog` opens none and takes the path in that file, removing it so each answer serves one dialog. `scripts/desktop_mcp.py` launches this build and wraps the server's tools.
 - File and folder pickers are opened by `open_dialog` through the `FileDialog` alias. On Linux, and on the other desktops rfd serves through the XDG portal, that alias is `rfd::AsyncFileDialog`, awaited with `slint::spawn_local` so the event loop keeps running while the dialog is open: a blocking dialog freezes the window there, and GNOME then reports the app as not responding. The dialog is not attached to the window, and a choice that arrives while an operation runs is dropped. macOS and Windows keep the window responsive during a blocking dialog, so there the alias is the blocking `rfd::FileDialog`. On macOS the desktop crate calls `pick_file_or_folder()` (rfd's combined picker, which internally wraps `NSOpenPanel`); on other platforms it falls back to `pick_file()` / `pick_folder()` because rfd does not expose a combined picker outside macOS. `main` sets the Linux app ID to the binary name, which is the name of the `.desktop` entry the `.deb` package installs.
 
 ### File Format (every artefact)

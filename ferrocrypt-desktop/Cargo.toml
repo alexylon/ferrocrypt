@@ -33,6 +33,12 @@ arboard = "3"
 slint = { version = "=1.18.1", features = ["unstable-winit-030"] }
 wayland-client = "0.31"
 
+[features]
+# Development only: Slint's built-in MCP server, so an agent can see and drive
+# the window, plus a stand-in for the file dialogs it cannot reach. Refused in
+# release builds. Launch with `scripts/desktop_mcp.py run`.
+mcp = ["slint/mcp"]
+
 # Test-only fast Argon2id parameters (19 MiB floor) so the dispatch test does
 # not pay the 1 GiB production KDF. Not published (this crate is publish = false).
 [dev-dependencies]
@@ -44,6 +50,14 @@ i-slint-backend-testing = "=1.18.1"
 [build-dependencies]
 # Keep in step with `slint`.
 slint-build = "=1.18.1"
+
+# Without optimization, the 1 GiB Argon2id of every passphrase operation takes
+# about a minute in a debug build (`cargo run`); with it, about ten seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 # cargo-wix is used for the Windows MSI build (cargo-bundle's MSI support is
 # still experimental). Suppress the EULA dialog (license-screen) for the

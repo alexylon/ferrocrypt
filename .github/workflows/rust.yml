@@ -384,6 +384,11 @@ jobs:
         working-directory: ferrocrypt-desktop
         run: cargo clippy --all-targets -- -D warnings
 
+      # The development-only build an agent drives; each OS has its own dialog code.
+      - name: Clippy ferrocrypt-desktop with the mcp feature
+        working-directory: ferrocrypt-desktop
+        run: cargo clippy --all-targets --features mcp -- -D warnings
+
       - name: Build ferrocrypt-desktop
         working-directory: ferrocrypt-desktop
         run: cargo build --verbose

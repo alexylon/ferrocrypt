@@ -6,7 +6,7 @@ use ferrocrypt::Passphrase;
 use ferrocrypt::{
     ArchiveLimits, CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
     KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey,
-    default_encrypted_filename, validate_private_key_file,
+    default_encrypted_filename, escape_path_for_display, validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -552,7 +552,7 @@ fn check_encrypt_conflict(input_path: &Path, target: &EncryptTarget) -> Result<(
     if path_occupied(&target) {
         return Err(CryptoError::InvalidInput(format!(
             "Already exists: {}",
-            target.display()
+            escape_path_for_display(&target)
         )));
     }
     Ok(())
@@ -567,7 +567,7 @@ fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
     outln!(
         "\n{} {} in {}\n",
         action,
-        output.display(),
+        escape_path_for_display(output),
         format_duration(elapsed)
     );
 }
@@ -841,7 +841,10 @@ fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
         None => generator,
     };
     let outcome = generator.write(&output_dir, |ev| eprintln!("{ev}"))?;
-    outln!("\nGenerated key pair in {}\n", output_dir.display());
+    outln!(
+        "\nGenerated key pair in {}\n",
+        escape_path_for_display(&output_dir)
+    );
     // Both lines come from the key material key generation produced, so
     // the fingerprint the user verifies identifies the recipient string
     // printed beside it.

@@ -6,10 +6,12 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Added
 - **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
+- **`escape_path_for_display` renders a path for showing to a person.** It escapes control characters, text-direction characters, the line and paragraph separators, and invisible characters such as the zero-width space, and keeps every other character, so an application built on the library can show paths the way the CLI and desktop app do.
 
 ### Fixed
-- **Library error messages now escape control characters, text-direction characters, and the line and paragraph separators (U+2028, U+2029) wherever they show the output folder.** Three messages a decrypt can return after its output is complete showed the folder unescaped, and the others did not escape the two separators, so a terminal or log viewer could run an escape sequence, reorder the text, or split a message.
+- **Library error messages now escape control characters, text-direction characters, the line and paragraph separators (U+2028, U+2029), and invisible characters such as the zero-width space wherever they show the output folder.** Three messages a decrypt can return after its output is complete showed the folder unescaped, and the others did not escape the two separators, so a terminal or log viewer could run an escape sequence, reorder the text, or split a message.
 - **On Windows, a decryption that finds its staging folder replaced before it writes any content now leaves that folder in place.** Its cleanup could remove a folder another program had put there. The decryption now stops with an error that names the folder.
+- **The CLI and desktop app now escape control characters, text-direction characters, the line and paragraph separators, and invisible characters in the paths they show.** A file name could carry a terminal escape sequence into the CLI's output, or make one name look like another in either app. This covers every path the CLI prints, and the desktop app's path fields, conflict warning, and result message.
 
 ## [0.3.1] - 2026-11-07
 

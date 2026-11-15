@@ -180,7 +180,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use crate::api::{
     Decryptor, Encryptor, KeyPairGenerator, PassphraseDecryptor, PrivateKeyDecryptor,
-    default_encrypted_filename, generate_key_pair, probe_recipient_mode,
+    default_encrypted_filename, escape_path_for_display, generate_key_pair, probe_recipient_mode,
     probe_recipient_mode_with_limits, validate_private_key_file, validate_public_key_file,
 };
 pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};

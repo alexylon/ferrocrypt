@@ -34,7 +34,7 @@ use crate::passphrase::Passphrase;
 use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::HeaderReadLimits;
 use crate::crypto::kdf::{KdfLimit, KdfParams};
-use crate::error::sanitize_path_for_display;
+use crate::error::{sanitize_path_for_display, sanitize_readable_path_for_display};
 use crate::format;
 use crate::fs::paths;
 use crate::key::limits::KeyReadLimits;
@@ -1412,6 +1412,35 @@ fn open_header_input(path: &Path) -> Result<Option<std::fs::File>, CryptoError> 
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let base_name = paths::encryption_base_name(input_path)?;
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
+}
+
+/// Renders a path for showing to a person, in a terminal or in a window.
+///
+/// Characters that could change or hide what the text shows are replaced by
+/// Rust-style escapes such as `\u{202e}`: control characters, which can carry
+/// terminal escape sequences; the twelve Unicode bidirectional-formatting
+/// characters, including the three direction marks an archived name may
+/// contain; the line and paragraph separators U+2028 and U+2029; and the
+/// characters a display draws as nothing, such as the zero-width space
+/// U+200B, which could make one name look like another.
+///
+/// Every other character is kept, so names in accented Latin, Cyrillic, or
+/// CJK stay readable, and the result is not shortened. Visible look-alike
+/// letters, such as a Cyrillic `а` in a Latin name, are kept too: telling
+/// them apart would mean escaping every non-ASCII letter. A path that is not
+/// valid UTF-8 is rendered lossily, as by [`Path::display`].
+///
+/// Once a character is escaped, the result no longer names the same file,
+/// so use it only for display, never to open or create a file.
+///
+/// # Examples
+///
+/// ```
+/// let shown = ferrocrypt::escape_path_for_display("caf\u{e9}/report\u{202e}fdp.exe");
+/// assert_eq!(shown, "caf\u{e9}/report\\u{202e}fdp.exe");
+/// ```
+pub fn escape_path_for_display(path: impl AsRef<Path>) -> String {
+    sanitize_readable_path_for_display(path.as_ref())
 }
 
 /// Checks the cleartext structure of a FerroCrypt `private.key` file.

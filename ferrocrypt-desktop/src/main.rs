@@ -7,7 +7,8 @@ use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, KdfLimit, KdfParams, KeyPairGenerator, PRIVATE_KEY_FILENAME,
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, UnauthenticatedRecipientMode,
-    default_encrypted_filename, generate_key_pair, probe_recipient_mode, validate_private_key_file,
+    default_encrypted_filename, escape_path_for_display, generate_key_pair, probe_recipient_mode,
+    validate_private_key_file,
 };
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use std::future::Future;
@@ -359,7 +360,7 @@ fn main() {
                 |dialog| dialog.add_filter("Key files", &["key"]).pick_file(),
                 move |app, path| {
                     let key_path = path_to_string(&path);
-                    app.set_key_path_display(elide_left(&key_path, ELIDE).into());
+                    app.set_key_path_display(elide_path(&key_path, ELIDE).into());
                     app.set_key_path(key_path.clone().into());
                     validate_selected_key(app, &key_path, &selected_public_key);
                     check_conflicts(app);
@@ -416,7 +417,7 @@ fn main() {
                 |dialog| dialog.pick_folder(),
                 |app, path| {
                     let dir = path_to_string(&path);
-                    app.set_keygen_output_dir_display(elide_left(&dir, ELIDE).into());
+                    app.set_keygen_output_dir_display(elide_path(&dir, ELIDE).into());
                     app.set_keygen_output_dir(dir.into());
                     check_conflicts(app);
                 },
@@ -536,7 +537,7 @@ fn main() {
                                     app.set_conflict_warning(Default::default());
                                     app.set_status_err(Default::default());
                                     app.set_mode(MODE_RECIPIENT_ENCRYPT);
-                                    app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
+                                    app.set_key_path_display(elide_path(&pub_key, ELIDE).into());
                                     app.set_key_path(pub_key.clone().into());
                                     validate_selected_key(&app, &pub_key, &selected_public_key);
                                     app.set_status_ok(
@@ -660,7 +661,7 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
     } else {
         ELIDE - 8
     };
-    app.set_input_path_display(elide_left(&selected, inpath_elide).into());
+    app.set_input_path_display(elide_path(&selected, inpath_elide).into());
     app.set_input_path(selected.clone().into());
     let old_mode = app.get_mode();
     let new_mode = next_mode(old_mode, detected_mode);
@@ -691,7 +692,7 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
 }
 
 fn update_output_path(app: &AppWindow, path: &str) {
-    app.set_output_path_display(elide_left(path, ELIDE).into());
+    app.set_output_path_display(elide_path(path, ELIDE).into());
     app.set_output_path(path.into());
     check_conflicts(app);
 }
@@ -734,7 +735,7 @@ fn compute_conflict_warning(
     pub_exists: bool,
 ) -> String {
     if is_encrypt_mode(mode) && !outpath.is_empty() && out_exists {
-        return elide_path_message("Already exists: ", outpath, "");
+        return elide_path_message("Already exists: ", &escape_path_for_display(outpath), "");
     }
     if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
         return match (secret_exists, pub_exists) {
@@ -798,12 +799,17 @@ fn parent_dir(path: &str) -> Option<String> {
 
 fn format_duration(action: &str, path: &Path, seconds: f64) -> String {
     if seconds < 60.0 {
-        format!("{} {} in {:.2} sec", action, path.display(), seconds)
+        format!(
+            "{} {} in {:.2} sec",
+            action,
+            escape_path_for_display(path),
+            seconds
+        )
     } else {
         format!(
             "{} {} in {} min, {:.2} sec",
             action,
-            path.display(),
+            escape_path_for_display(path),
             seconds as u32 / 60,
             seconds % 60.0
         )
@@ -831,6 +837,12 @@ fn elide_left(text: &str, max: usize) -> String {
         .map(|(idx, _)| idx)
         .unwrap_or(0);
     format!("\u{2026}{}", &text[start..])
+}
+
+/// Left-elides a path for a display field, after escaping it with
+/// [`escape_path_for_display`]. The field's real value keeps the raw path.
+fn elide_path(path: &str, max: usize) -> String {
+    elide_left(&escape_path_for_display(path), max)
 }
 
 fn elide_path_message(prefix: &str, path: &str, suffix: &str) -> String {
@@ -1691,6 +1703,24 @@ mod tests {
         let out = format_duration("Encrypted to", Path::new("/tmp/out"), 125.5);
         assert!(out.contains("2 min"));
         assert!(out.contains("5.50 sec"));
+    }
+
+    #[test]
+    fn shown_paths_escape_control_and_direction_characters() {
+        let out = format_duration("Decrypted to", Path::new("/tmp/re\u{200f}port"), 1.0);
+        assert_eq!(out, "Decrypted to /tmp/re\\u{200f}port in 1.00 sec");
+
+        assert_eq!(elide_path("/tmp/a\u{1b}b", ELIDE), "/tmp/a\\u{1b}b");
+
+        let w = compute_conflict_warning(
+            MODE_PASSPHRASE_ENCRYPT,
+            "/tmp/a\nb.fcr",
+            "",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(w, "Already exists: /tmp/a\\nb.fcr");
     }
 
     #[test]

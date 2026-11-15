@@ -279,12 +279,12 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
 ///
 /// The parent directory is the caller's trust boundary: kept readable
 /// and never truncated so the operator can always locate the conflict,
-/// but control, bidirectional-formatting, and line-separator characters
-/// in it are still escaped so a hostile intermediate component cannot
-/// smuggle a terminal escape sequence into the message or break it onto
-/// a new line. The final component can be attacker-influenced (an
-/// input-derived file stem, an archive-chosen root name), so it is
-/// routed through the stricter, length-bounded sanitizer.
+/// but control, bidirectional-formatting, line-separator, and invisible
+/// characters in it are still escaped so a hostile intermediate component
+/// cannot smuggle a terminal escape sequence into the message, break it
+/// onto a new line, or hide a character in it. The final component can be
+/// attacker-influenced (an input-derived file stem, an archive-chosen root
+/// name), so it is routed through the stricter, length-bounded sanitizer.
 pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "{label} already exists: {}",

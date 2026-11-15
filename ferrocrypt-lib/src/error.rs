@@ -238,8 +238,8 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
 /// exists" conflict messages instead route through
 /// `fs::paths::already_exists_error`, which keeps the trusted parent
 /// directory readable and untruncated — escaping only control,
-/// bidirectional-formatting, and line-separator characters in it — and
-/// routes the final component through this stricter, truncating
+/// bidirectional-formatting, line-separator, and invisible characters in
+/// it — and routes the final component through this stricter, truncating
 /// sanitizer.
 pub(crate) fn sanitize_path_for_display(path: &std::path::Path) -> String {
     sanitize_for_display(&path.display().to_string())
@@ -289,12 +289,40 @@ pub(crate) fn is_bidi_control(c: char) -> bool {
 /// grammar rejects them, and both error-message sanitizers escape them.
 pub(crate) const LINE_SEPARATORS: RangeInclusive<char> = '\u{2028}'..='\u{2029}';
 
+/// The Unicode `Default_Ignorable_Code_Point` ranges: characters a
+/// display draws as nothing, such as the soft hyphen U+00AD, the
+/// zero-width space U+200B, and the byte order mark U+FEFF. Hidden in a
+/// name, one can make that name look like another.
+const INVISIBLE_CHARACTERS: [RangeInclusive<char>; 17] = [
+    '\u{00AD}'..='\u{00AD}',
+    '\u{034F}'..='\u{034F}',
+    '\u{061C}'..='\u{061C}',
+    '\u{115F}'..='\u{1160}',
+    '\u{17B4}'..='\u{17B5}',
+    '\u{180B}'..='\u{180F}',
+    '\u{200B}'..='\u{200F}',
+    '\u{202A}'..='\u{202E}',
+    '\u{2060}'..='\u{206F}',
+    '\u{3164}'..='\u{3164}',
+    '\u{FE00}'..='\u{FE0F}',
+    '\u{FEFF}'..='\u{FEFF}',
+    '\u{FFA0}'..='\u{FFA0}',
+    '\u{FFF0}'..='\u{FFF8}',
+    '\u{1BCA0}'..='\u{1BCA3}',
+    '\u{1D173}'..='\u{1D17A}',
+    '\u{E0000}'..='\u{E0FFF}',
+];
+
 /// Returns whether `c` must be escaped even in text that is otherwise
 /// kept readable: a control character, a bidirectional-formatting
-/// character, or a line separator. [`sanitize_for_display`] escapes all
-/// of these too, together with every other non-ASCII character.
+/// character, a line separator, or a character a display draws as
+/// nothing. [`sanitize_for_display`] escapes all of these too, together
+/// with every other non-ASCII character.
 fn must_escape_in_readable_text(c: char) -> bool {
-    c.is_control() || is_bidi_control(c) || LINE_SEPARATORS.contains(&c)
+    c.is_control()
+        || is_bidi_control(c)
+        || LINE_SEPARATORS.contains(&c)
+        || INVISIBLE_CHARACTERS.iter().any(|range| range.contains(&c))
 }
 
 /// Renders a trusted path prefix — the parent directory of an
@@ -303,7 +331,8 @@ fn must_escape_in_readable_text(c: char) -> bool {
 /// as accented Latin or CJK, so the operator can still read and locate
 /// the directory. The characters `must_escape_in_readable_text` names
 /// are escaped, so the prefix cannot inject a terminal escape sequence,
-/// visually reorder the message, or break it onto a new line.
+/// visually reorder the message, break it onto a new line, or hide a
+/// character in it.
 ///
 /// Unlike [`sanitize_for_display`], the result is not length-bounded:
 /// the operator uses the parent to locate the conflict, so it is kept
@@ -323,11 +352,13 @@ pub(crate) fn sanitize_prefix_for_display(text: &str) -> String {
     out
 }
 
-/// Renders the caller's own directory, such as the output directory of
-/// a decrypt, for an error message: [`sanitize_prefix_for_display`] over
-/// `Path::display`, so it stays readable and whole.
-pub(crate) fn sanitize_trusted_dir_for_display(dir: &std::path::Path) -> String {
-    sanitize_prefix_for_display(&dir.display().to_string())
+/// Renders a whole path under the readable rule of
+/// [`sanitize_prefix_for_display`], over `Path::display`, so it stays
+/// readable and whole. Used for the caller's output directory in the
+/// post-commit decrypt messages and by the public
+/// [`crate::escape_path_for_display`].
+pub(crate) fn sanitize_readable_path_for_display(path: &std::path::Path) -> String {
+    sanitize_prefix_for_display(&path.display().to_string())
 }
 
 /// Renders `: {path}` when an optional sanitized path is present, and

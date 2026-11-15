@@ -2207,6 +2207,80 @@ fn test_encrypt_conflict_detects_dangling_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_encrypt_conflict_escapes_a_control_character_in_the_path() {
+    let test_dir = setup_test_dir("encrypt_conflict_escapes_control");
+    let input_file = test_dir.join("da\u{1b}[31mta.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+    create_test_file(&encrypt_dir.join("da\u{1b}[31mta.fcr"), "occupied");
+
+    let out = cli_command(&get_binary_path())
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt onto an occupied output");
+    assert!(!out.status.success(), "should fail on the conflict");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Already exists: ") && stderr.contains("da\\u{1b}[31mta.fcr"),
+        "expected the escaped conflict path, got: {stderr}"
+    );
+    assert!(!stderr.contains('\u{1b}'), "raw escape in: {stderr:?}");
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_result_messages_escape_a_direction_mark_in_the_path() {
+    let test_dir = setup_test_dir("result_messages_escape_mark");
+    let input_file = test_dir.join("re\u{200f}port.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+    let binary = get_binary_path();
+
+    let encrypted = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    let decrypted = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("re\u{200f}port.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt");
+
+    for (run, shown) in [
+        (&encrypted, "re\\u{200f}port.fcr"),
+        (&decrypted, "re\\u{200f}port.txt"),
+    ] {
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(stdout.contains(shown), "expected {shown} in: {stdout}");
+        assert!(!stdout.contains('\u{200f}'), "raw mark in: {stdout:?}");
+    }
+}
+
+#[test]
 fn test_passphrase_encrypt_conflict_with_save_as() {
     let test_dir = setup_test_dir("passphrase_save_as_conflict");
     let input_file = test_dir.join("data.txt");

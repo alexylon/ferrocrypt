@@ -2289,3 +2289,41 @@ fn encryptor_with_public_keys_stops_at_the_structural_recipient_ceiling() {
     let at_ceiling: Vec<PublicKey> = (0..usize::from(ceiling)).map(|_| key.clone()).collect();
     Encryptor::with_public_keys(at_ceiling).expect("a list at the ceiling must construct");
 }
+
+#[test]
+fn escape_path_for_display_escapes_only_what_changes_how_text_is_shown() {
+    let readable =
+        "caf\u{e9}/\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}/\u{65e5}\u{672c}/a file.txt";
+    assert_eq!(ferrocrypt::escape_path_for_display(readable), readable);
+
+    let long = "a".repeat(1000);
+    assert_eq!(ferrocrypt::escape_path_for_display(&long), long);
+
+    // Visible neighbours of the escaped ranges stay as they are.
+    let neighbours = "\u{ac}\u{ae}\u{34e}\u{350}\u{2027}\u{2070}\u{3165}\u{fe10}\u{ffa1}\u{fff9}";
+    assert_eq!(ferrocrypt::escape_path_for_display(neighbours), neighbours);
+
+    // Controls, the twelve bidirectional characters, the line and paragraph
+    // separators, and a sample of every invisible range.
+    let escaped = concat!(
+        "\u{1b}\n\r\t\u{7f}\u{85}\u{9b}",
+        "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}",
+        "\u{200e}\u{200f}\u{61c}\u{2028}\u{2029}",
+        "\u{ad}\u{34f}\u{115f}\u{17b4}\u{180e}\u{200b}\u{200c}\u{200d}\u{2060}\u{2064}",
+        "\u{2065}\u{206f}\u{3164}\u{fe00}\u{fe0f}\u{feff}\u{ffa0}\u{fff0}\u{1bca0}",
+        "\u{1d173}\u{e0001}\u{e0041}\u{e0100}\u{e0fff}",
+    );
+    for c in escaped.chars() {
+        let shown = ferrocrypt::escape_path_for_display(format!("dir/a{c}b"));
+        assert_eq!(shown, format!("dir/a{}b", c.escape_default()), "{c:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn escape_path_for_display_renders_a_non_utf8_name_lossily() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = Path::new(std::ffi::OsStr::from_bytes(b"dir/a\xffb"));
+    assert_eq!(ferrocrypt::escape_path_for_display(path), "dir/a\u{fffd}b");
+}

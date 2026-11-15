@@ -9,6 +9,7 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Fixed
 - **Library error messages now escape control characters, text-direction characters, and the line and paragraph separators (U+2028, U+2029) wherever they show the output folder.** Three messages a decrypt can return after its output is complete showed the folder unescaped, and the others did not escape the two separators, so a terminal or log viewer could run an escape sequence, reorder the text, or split a message.
+- **On Windows, a decryption that finds its staging folder replaced before it writes any content now leaves that folder in place.** Its cleanup could remove a folder another program had put there. The decryption now stops with an error that names the folder.
 
 ## [0.3.1] - 2026-11-07
 

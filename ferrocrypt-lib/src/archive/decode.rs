@@ -111,6 +111,7 @@ fn unarchive_inner<R: Read>(
         policy,
         Seams {
             compare_owners: platform::compare_owners,
+            retain_staged_dir: platform::retain_staged_dir,
             before_promotion: || Ok(()),
             after_promotion: |_| Ok(()),
             after_root_mode: |_| Ok(()),
@@ -124,12 +125,26 @@ fn unarchive_inner<R: Read>(
 /// so the test for a mismatch substitutes the answer.
 type CompareOwners = fn(&Dir, &File) -> Result<OwnerComparison, CryptoError>;
 
+/// Takes the second handle to a staged directory root — see
+/// [`platform::retain_staged_dir`]. A seam because the substitution
+/// that handle can reveal happens between two operations of one run,
+/// so the test for it substitutes the handle.
+type RetainStagedDir = fn(&Dir, &OsStr, &Dir) -> io::Result<Dir>;
+
+/// The two [`Seams`] a directory root is staged through.
+#[derive(Clone, Copy)]
+struct DirectoryRootSeams {
+    compare_owners: CompareOwners,
+    retain_staged_dir: RetainStagedDir,
+}
+
 /// Implementation seams of [`unarchive_inner_with_hooks`]: the
-/// staged-root ownership read, the interval between staging and
-/// promotion, post-promotion outcomes, and the interval after root-mode
-/// confirmation. Production supplies [`platform::compare_owners`] and
-/// no-op hooks; tests use them to exercise a replaced staged root, the
-/// promotion window, post-commit reporting, and cleanup.
+/// staged-root ownership read, the second handle to a staged directory
+/// root, the interval between staging and promotion, post-promotion
+/// outcomes, and the interval after root-mode confirmation. Production
+/// supplies [`platform::compare_owners`], [`platform::retain_staged_dir`],
+/// and no-op hooks; tests use them to exercise a replaced staged root,
+/// the promotion window, post-commit reporting, and cleanup.
 /// `after_root_mode` receives the record a ratification moved out of the
 /// cleanup slot, so a test can confirm the retained handle is still held
 /// at that point.
@@ -140,6 +155,7 @@ where
     M: FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
 {
     compare_owners: CompareOwners,
+    retain_staged_dir: RetainStagedDir,
     before_promotion: B,
     after_promotion: A,
     after_root_mode: M,
@@ -160,6 +176,7 @@ where
 {
     let Seams {
         compare_owners,
+        retain_staged_dir,
         before_promotion,
         after_promotion,
         after_root_mode,
@@ -241,7 +258,10 @@ where
                 &manifest,
                 &mut cleanup.root,
                 output_dir,
-                compare_owners,
+                DirectoryRootSeams {
+                    compare_owners,
+                    retain_staged_dir,
+                },
             )?;
         }
 
@@ -501,25 +521,42 @@ fn extract_directory_root<R: Read>(
     manifest: &Manifest,
     staged_root: &mut Option<StagedRoot>,
     output_dir: &Path,
-    compare_owners: CompareOwners,
+    seams: DirectoryRootSeams,
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
 
     let root_dir = platform::mkdir_strict(output_handle, incomplete_name).map_err(|e| {
         map_already_exists(e, || incomplete_output_exists(output_dir, incomplete_name))
     })?;
-    // mkdir_strict succeeded — this run owns the staging directory.
+    // mkdir_strict created the staging directory and then opened it by
+    // name, so until the owner check before the first content the
+    // handle is taken to denote the run's own directory without proof.
     // The recorded handle is a second handle to the same directory, so
     // the checks after promotion and the cleanup keep working after the
     // one below is closed at the end of extraction. A second handle is
     // required on the same terms as the file root: where it cannot be
     // taken the record takes the handle this function would have walked
-    // from, and the error returns before any plaintext.
-    let recorded = match retain_staged_directory(output_handle, incomplete_name, &root_dir) {
+    // from, and where it denotes another directory nothing is recorded,
+    // as either handle may be the substitute. Both errors return before
+    // any plaintext.
+    let retained = retain_staged_directory(
+        seams.retain_staged_dir,
+        output_handle,
+        incomplete_name,
+        &root_dir,
+    );
+    let recorded = match retained {
         Ok(recorded) => recorded,
-        Err(e) => {
+        Err(RetainFailure::Failed(e)) => {
             *staged_root = Some(StagedRoot::directory(incomplete_name, Some(root_dir)));
             return Err(e);
+        }
+        Err(RetainFailure::Substituted) => {
+            return Err(staged_root_left_in_place(
+                STAGED_ROOT_CHANGED,
+                output_dir,
+                incomplete_name,
+            ));
         }
     };
     *staged_root = Some(StagedRoot::directory(incomplete_name, Some(recorded)));
@@ -561,7 +598,7 @@ fn extract_directory_root<R: Read>(
         // that can tell (see `require_staged_root_owner`).
         if !root_owner_confirmed {
             require_staged_root_owner(
-                compare_owners(&root_dir, &outfile)?,
+                (seams.compare_owners)(&root_dir, &outfile)?,
                 staged_root,
                 output_dir,
                 incomplete_name,
@@ -649,7 +686,11 @@ fn require_staged_root_owner(
 ) -> Result<(), CryptoError> {
     if comparison == OwnerComparison::Different {
         *staged_root = None;
-        return Err(staged_root_replaced(output_dir, incomplete_name));
+        return Err(staged_root_left_in_place(
+            STAGED_ROOT_REPLACED,
+            output_dir,
+            incomplete_name,
+        ));
     }
     Ok(())
 }
@@ -658,24 +699,39 @@ fn require_staged_root_owner(
 /// after promotion and for cleanup. Where the platform opens it by name
 /// rather than duplicating `root_dir` ([`platform::retain_staged_dir`]),
 /// the entry at that name may already have been swapped, so the handle
-/// is confirmed to denote the directory `mkdir_strict` just created
-/// before it is recorded — a mismatch is a substitution and refuses the
-/// run before any plaintext, like a substitution found after promotion.
-/// Where either identity is absent the confirmation is skipped.
+/// is confirmed to denote the same directory as `root_dir` before it is
+/// recorded. Where either identity is absent the confirmation is
+/// skipped.
 fn retain_staged_directory(
+    retain_staged_dir: RetainStagedDir,
     output_handle: &Dir,
     incomplete_name: &OsStr,
     root_dir: &Dir,
-) -> Result<Dir, CryptoError> {
-    let retained = platform::retain_staged_dir(output_handle, incomplete_name, root_dir)
-        .map_err(|e| staged_handle_unavailable(&e))?;
-    if let (Some(created), Some(opened)) = (
-        platform::dir_object_id(root_dir)?,
-        platform::dir_object_id(&retained)?,
-    ) {
-        require_staged_identity(created, opened, incomplete_name)?;
+) -> Result<Dir, RetainFailure> {
+    let retained = retain_staged_dir(output_handle, incomplete_name, root_dir)
+        .map_err(|e| RetainFailure::Failed(staged_handle_unavailable(&e)))?;
+    let created = platform::dir_object_id(root_dir).map_err(RetainFailure::Failed)?;
+    let opened = platform::dir_object_id(&retained).map_err(RetainFailure::Failed)?;
+    if let (Some(created), Some(opened)) = (created, opened) {
+        if created != opened {
+            return Err(RetainFailure::Substituted);
+        }
     }
+
     Ok(retained)
+}
+
+/// Why [`retain_staged_directory`] recorded no second handle.
+#[derive(Debug)]
+enum RetainFailure {
+    /// The handle could not be taken or described. Nothing showed a
+    /// substitution, so the directory `root_dir` denotes is treated as
+    /// the run's own, as it is when the handle is taken.
+    Failed(CryptoError),
+    /// The two handles denote different directories. Either may be one
+    /// another program put at the working name, so neither is the run's
+    /// to remove.
+    Substituted,
 }
 
 /// What the step-16 mode application learned about the entry at the
@@ -946,10 +1002,7 @@ const ERROR_NO_SYSTEM_RESOURCES: i32 = 1450;
 /// Rejection for a promoted root that no longer denotes the object this
 /// run staged: the entry was replaced after the commit, so its content
 /// did not come from the archive and must not be reported as the
-/// decrypted output. Also raised, with the staging name, where the
-/// retained staged handle turns out not to denote the directory this
-/// run created ([`retain_staged_directory`]) — the same substitution,
-/// caught before any plaintext.
+/// decrypted output.
 fn promoted_root_replaced(root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Output was replaced while decrypting: {}",
@@ -957,21 +1010,27 @@ fn promoted_root_replaced(root_name: &OsStr) -> CryptoError {
     ))
 }
 
-/// Rejection for a staged directory root that is not the directory this
-/// run created (see [`require_staged_root_owner`]). The entry is left in
-/// place, so the message names it; the parent is the caller's own path
-/// and stays readable, the working name is archive-derived and is
-/// escaped.
-fn staged_root_replaced(output_dir: &Path, working_name: &OsStr) -> CryptoError {
+/// Rejection for a staged directory root that may not be the directory
+/// this run created, with `reason` saying what showed it (see
+/// [`require_staged_root_owner`] and [`retain_staged_directory`]). The
+/// entry is left in place, so the message names it; the parent is the
+/// caller's own path and stays readable, the working name is
+/// archive-derived and is escaped.
+fn staged_root_left_in_place(reason: &str, output_dir: &Path, working_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "{STAGED_ROOT_REPLACED}: {}",
+        "{reason}: {}",
         sanitize_path_keeping_parent(&output_dir.join(working_name))
     ))
 }
 
-/// What [`staged_root_replaced`] reports, ahead of the path.
+/// What [`staged_root_left_in_place`] reports for a staged root with
+/// another owner, ahead of the path.
 const STAGED_ROOT_REPLACED: &str =
     "Incomplete output belongs to another owner and was left in place";
+
+/// What [`staged_root_left_in_place`] reports for a staged root whose
+/// two handles denote different directories, ahead of the path.
+const STAGED_ROOT_CHANGED: &str = "Incomplete output changed and was left in place";
 
 /// Rejection for a staged root whose descriptor could not be
 /// duplicated, so the run cannot confirm after promotion that the final
@@ -2327,8 +2386,8 @@ mod tests {
     }
 
     /// One directory root `d` holding a single file, used by the
-    /// promotion-window tests below and by the cumulative
-    /// entry-extension cap.
+    /// staged-root and promotion-window tests below and by the
+    /// cumulative entry-extension cap.
     fn directory_root_manifest() -> Manifest {
         Manifest {
             entries: vec![
@@ -2400,6 +2459,118 @@ mod tests {
         );
     }
 
+    /// Decrypts [`directory_root_manifest`] into a fresh `out` directory
+    /// with `retain_staged_dir` taking the second handle to the staged
+    /// root, and returns the temporary directory, `out`, and the error
+    /// the run must end with.
+    fn extract_with_retain(
+        policy: &IncompleteOutputPolicy,
+        retain_staged_dir: RetainStagedDir,
+    ) -> (tempfile::TempDir, PathBuf, CryptoError) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(build_archive(
+                &directory_root_manifest(),
+                &[("d/a.txt", b"real")],
+            )),
+            &out,
+            ArchiveLimits::default(),
+            policy.clone(),
+            Seams {
+                compare_owners: platform::compare_owners,
+                retain_staged_dir,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
+            },
+        )
+        .unwrap_err();
+
+        (tmp, out, err)
+    }
+
+    /// A second handle to the staged directory root that denotes another
+    /// directory shows a substitution between the run's own operations,
+    /// and either handle may be the substitute. The run stops before any
+    /// content under both policies, names the working path, and removes
+    /// nothing: neither the entry at the working name nor the other
+    /// directory is shown to be the run's. Only Windows opens that handle
+    /// by name, so only there can it differ in a real run; the handle is
+    /// substituted here to drive the refusal on every platform.
+    #[test]
+    fn a_staged_root_whose_second_handle_differs_is_refused_and_left_in_place() {
+        fn another_directory(parent: &Dir, _: &OsStr, _: &Dir) -> io::Result<Dir> {
+            parent.create_dir("planted")?;
+            parent.open_dir("planted")
+        }
+
+        for policy in [
+            IncompleteOutputPolicy::DeleteOnError,
+            IncompleteOutputPolicy::RetainOnError,
+        ] {
+            let (_tmp, out, err) = extract_with_retain(&policy, another_directory);
+            let staged = out.join("d.incomplete");
+            let message = err.to_string();
+            assert!(
+                matches!(err, CryptoError::InvalidInput(_))
+                    && message.contains(STAGED_ROOT_CHANGED)
+                    && message.contains("d.incomplete"),
+                "{policy:?}: expected the changed staged root to be named, got: {message}"
+            );
+            assert!(
+                staged.is_dir(),
+                "{policy:?}: the entry at the working name must stay in place"
+            );
+            assert_eq!(
+                fs::read_dir(&staged).unwrap().count(),
+                0,
+                "{policy:?}: the run must stop before writing content"
+            );
+            assert!(
+                out.join("planted").is_dir(),
+                "{policy:?}: the other directory must stay in place"
+            );
+            assert!(!out.join("d").exists(), "{policy:?}: nothing was promoted");
+        }
+    }
+
+    /// A second handle to the staged directory root that cannot be taken
+    /// shows no substitution, so the empty directory the run created is
+    /// treated as its own: the run stops before any content,
+    /// `DeleteOnError` removes the directory through the handle it was
+    /// created with, and `RetainOnError` keeps it.
+    #[test]
+    fn a_staged_root_without_a_second_handle_is_refused_and_cleaned_up() {
+        fn no_handle(_: &Dir, _: &OsStr, _: &Dir) -> io::Result<Dir> {
+            Err(io::Error::other("out of handles"))
+        }
+
+        for policy in [
+            IncompleteOutputPolicy::DeleteOnError,
+            IncompleteOutputPolicy::RetainOnError,
+        ] {
+            let (_tmp, out, err) = extract_with_retain(&policy, no_handle);
+            let staged = out.join("d.incomplete");
+            assert!(
+                matches!(err, CryptoError::Io(_))
+                    && err.to_string().contains(STAGED_HANDLE_UNAVAILABLE),
+                "{policy:?}: expected the missing handle to be reported, got: {err}"
+            );
+            let retained = matches!(policy, IncompleteOutputPolicy::RetainOnError);
+            assert_eq!(
+                staged.exists(),
+                retained,
+                "{policy:?}: the run's own empty directory follows the policy"
+            );
+            if retained {
+                assert_eq!(fs::read_dir(&staged).unwrap().count(), 0, "{policy:?}");
+            }
+            assert!(!out.join("d").exists(), "{policy:?}: nothing was promoted");
+        }
+    }
+
     /// The staged root is created and then opened by name, and a local
     /// writer who replaces the empty directory between those two
     /// operations owns the directory the run then extracts into. The
@@ -2445,6 +2616,7 @@ mod tests {
                 policy.clone(),
                 Seams {
                     compare_owners: another_owner,
+                    retain_staged_dir: platform::retain_staged_dir,
                     before_promotion: || Ok(()),
                     after_promotion: |_| Ok(()),
                     after_root_mode: |_| Ok(()),
@@ -2515,6 +2687,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: unavailable,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |_| Ok(()),
                 after_root_mode: |_| Ok(()),
@@ -2554,6 +2727,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     // Move the staged tree aside and leave a directory of
                     // the attacker's under the staging name.
@@ -2638,6 +2812,7 @@ mod tests {
                 IncompleteOutputPolicy::DeleteOnError,
                 Seams {
                     compare_owners: platform::compare_owners,
+                    retain_staged_dir: platform::retain_staged_dir,
                     before_promotion: || {
                         fs::remove_dir(&out)?;
                         platform::try_make_junction(&decoy, &out)?;
@@ -2754,6 +2929,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     let staged = out.join("f.txt.incomplete");
                     fs::rename(&staged, out.join("moved-aside"))?;
@@ -3259,8 +3435,8 @@ mod tests {
     /// compare against, so it must denote the directory this run
     /// created. On Windows it is opened by name — a duplicate of the
     /// creating handle would refuse the promotion rename — and a
-    /// mismatch with the created directory is refused before any
-    /// plaintext, as a replacement.
+    /// mismatch with the created directory is reported as a
+    /// substitution, which the caller refuses before any plaintext.
     #[cfg(windows)]
     #[test]
     fn a_retained_staged_directory_must_be_the_created_one() {
@@ -3268,14 +3444,16 @@ mod tests {
         let handle = platform::open_anchor(tmp.path()).unwrap();
         let created = platform::mkdir_strict(&handle, OsStr::new("d.incomplete")).unwrap();
         let _other = platform::mkdir_strict(&handle, OsStr::new("other")).unwrap();
+        let retain = platform::retain_staged_dir;
 
-        retain_staged_directory(&handle, OsStr::new("d.incomplete"), &created)
+        retain_staged_directory(retain, &handle, OsStr::new("d.incomplete"), &created)
             .expect("the retained handle denotes the created directory");
 
-        let err = retain_staged_directory(&handle, OsStr::new("other"), &created).unwrap_err();
+        let err =
+            retain_staged_directory(retain, &handle, OsStr::new("other"), &created).unwrap_err();
         assert!(
-            format!("{err}").contains("Output was replaced while decrypting"),
-            "a handle on another directory must be refused, got: {err}"
+            matches!(err, RetainFailure::Substituted),
+            "a handle on another directory must be a substitution, got: {err:?}"
         );
     }
 
@@ -3359,6 +3537,7 @@ mod tests {
             policy,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |_| Ok(()),
                 after_root_mode: |_| Ok(()),
@@ -3415,6 +3594,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |_| Ok(()),
                 after_root_mode: |ratified: &Option<StagedRoot>| -> Result<(), CryptoError> {
@@ -5245,6 +5425,7 @@ mod tests {
                 IncompleteOutputPolicy::DeleteOnError,
                 Seams {
                     compare_owners: platform::compare_owners,
+                    retain_staged_dir: platform::retain_staged_dir,
                     before_promotion: || {
                         Err(CryptoError::InvalidInput("injected failure".to_owned()))
                     },
@@ -5291,6 +5472,7 @@ mod tests {
                 IncompleteOutputPolicy::DeleteOnError,
                 Seams {
                     compare_owners: platform::compare_owners,
+                    retain_staged_dir: platform::retain_staged_dir,
                     before_promotion: || -> Result<(), CryptoError> {
                         panic!("test-induced panic before promotion")
                     },
@@ -5345,6 +5527,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: move || {
                     // Removing `d.incomplete` needs write permission on
                     // `out`, which belongs to the caller, not to the run.
@@ -5409,6 +5592,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: move || {
                     fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
                     Err(CryptoError::InvalidInput("injected failure".to_owned()))
@@ -5460,6 +5644,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |_| Ok(()),
                 after_root_mode: |_| {
@@ -5526,6 +5711,7 @@ mod tests {
                 IncompleteOutputPolicy::DeleteOnError,
                 Seams {
                     compare_owners: platform::compare_owners,
+                    retain_staged_dir: platform::retain_staged_dir,
                     before_promotion: || Ok(()),
                     after_promotion: |_| Ok(()),
                     after_root_mode: |ratified| {
@@ -5574,6 +5760,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |promotion| {
                     fs::hard_link(&final_path, &incomplete_path)?;
@@ -5628,6 +5815,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     fs::hard_link(&incomplete_path, &outsider_path)?;
                     Ok(())
@@ -5815,6 +6003,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     fs::hard_link(&incomplete_path, &outsider_path)?;
                     Ok(())
@@ -5874,6 +6063,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |promotion| {
                     fs::hard_link(&final_path, &hidden_path)?;
@@ -6046,6 +6236,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || Ok(()),
                 after_promotion: |_| Ok(()),
                 after_root_mode: |_| {
@@ -6227,6 +6418,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     fs::hard_link(&incomplete_path, &attacker_link)?;
                     fs::rename(&incomplete_path, &aside)?;
@@ -6289,6 +6481,7 @@ mod tests {
             IncompleteOutputPolicy::DeleteOnError,
             Seams {
                 compare_owners: platform::compare_owners,
+                retain_staged_dir: platform::retain_staged_dir,
                 before_promotion: || {
                     fs::hard_link(&incomplete_path, &evil)?;
                     Ok(())

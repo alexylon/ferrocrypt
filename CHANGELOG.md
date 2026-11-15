@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
 ### Added
 - **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
 - **`escape_path_for_display` renders a path for showing to a person.** It escapes control characters, text-direction characters, the line and paragraph separators, and invisible characters such as the zero-width space, and keeps every other character, so an application built on the library can show paths the way the CLI and desktop app do.

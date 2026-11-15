@@ -5,10 +5,10 @@
 <p align="center"><a href="https://ferrocrypt.app">ferrocrypt.app</a></p>
 
 [![Build and tests](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml)
-[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.3.1)
-[![API documentation](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.3.1)
+[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.4.0)
+[![API documentation](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.4.0)
 ![Library minimum Rust version](https://img.shields.io/badge/Rust-1.87%2B-blue)
-[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.3.1)
+[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.4.0)
 
 FerroCrypt encrypts files and folders into a single `.fcr` file. It is available
 as a desktop app, a command-line tool, and a Rust library for Linux, macOS, and
@@ -91,7 +91,7 @@ sudo snap connect ferrocrypt:removable-media
 Requires Rust 1.89 or later:
 
 ```bash
-cargo install ferrocrypt-cli@0.3.1 --locked
+cargo install ferrocrypt-cli@0.4.0 --locked
 ```
 
 The installed command is `ferrocrypt`.
@@ -101,7 +101,7 @@ The installed command is `ferrocrypt`.
 Requires Rust 1.87 or later:
 
 ```bash
-cargo add ferrocrypt@0.3.1
+cargo add ferrocrypt@0.4.0
 ```
 
 The library handles files, folders, output naming, and encryption through

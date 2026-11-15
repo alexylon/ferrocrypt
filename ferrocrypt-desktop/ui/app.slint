@@ -104,6 +104,8 @@ global Theme {
     out property <length> icon-btn: 22px;
     out property <length> icon: 11px;
     out property <length> icon-stroke: 1.5px;
+    // Heavier than `icon-stroke`: the password match mark is read at a glance.
+    out property <length> match-stroke: 2px;
     out property <length> focus-ring: 2px;
     // Wide enough for "Strong" in the system fonts, so the meter beside it
     // keeps its length whatever the label says.
@@ -1322,15 +1324,21 @@ export component AppWindow inherits Window {
                         accessible-role: none;
                     }
 
-                    // Match dot (inside field, right edge)
-                    if password-repeated != "": Rectangle {
-                        x: parent.width - 22px;
-                        y: (parent.height - 10px) / 2;
-                        width: 10px;
-                        height: 10px;
-                        border-radius: Theme.radius-md;
-                        background: password-match ? Theme.success : Theme.error;
-                        animate background { duration: Theme.dur-slow; }
+                    // A check or a cross, so the shape tells a match apart
+                    // without the colour.
+                    if password-repeated != "": Path {
+                        x: parent.width - 17px - self.width / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: Theme.icon;
+                        height: Theme.icon;
+                        viewbox-width: 11;
+                        viewbox-height: 11;
+                        commands: password-match ? "M 1 6 L 4 9 L 10 2" : "M 2 2 L 9 9 M 9 2 L 2 9";
+                        stroke: password-match ? Theme.success : Theme.error;
+                        stroke-width: Theme.match-stroke;
+                        accessible-role: image;
+                        accessible-label: password-match ? "Passwords match" : "Passwords do not match";
+                        animate stroke { duration: Theme.dur-slow; }
                     }
                 }
             }

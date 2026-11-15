@@ -2403,6 +2403,37 @@ mod tests {
         assert!(bars().is_empty());
     }
 
+    /// Whether the confirmation matches is said by a check or a cross with a
+    /// name, not by colour alone.
+    #[test]
+    fn the_password_match_mark_has_a_name() {
+        use i_slint_backend_testing::AccessibleRole;
+
+        let app = headless_app();
+        app.show().unwrap();
+        let marks = || -> Vec<String> {
+            app.root_element()
+                .query_descendants()
+                .match_accessible_role(AccessibleRole::Image)
+                .find_all()
+                .iter()
+                .filter_map(|mark| mark.accessible_label())
+                .map(|label| label.to_string())
+                .collect()
+        };
+        assert!(marks().is_empty());
+
+        app.set_password("first".into());
+        app.set_password_repeated("firs".into());
+        assert_eq!(marks(), ["Passwords do not match"]);
+
+        app.set_password_repeated("first".into());
+        assert_eq!(marks(), ["Passwords match"]);
+
+        app.set_password_repeated("".into());
+        assert!(marks().is_empty());
+    }
+
     /// A headless platform for layout checks.
     struct Headless(Rc<MinimalSoftwareWindow>);
 

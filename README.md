@@ -48,7 +48,7 @@ Download the package for your system from [GitHub Releases](https://github.com/a
 |---|---|---|
 | macOS, Intel or Apple silicon | `.tar.gz` | `.zip` containing `FerroCrypt.app` |
 | Linux, 64-bit Intel/AMD | `.tar.gz`, `gnu` or `musl` | `.deb` for Debian/Ubuntu, or the [Snap Store](#install-the-desktop-app-from-the-snap-store) |
-| Linux, 64-bit ARM | `.tar.gz`, `musl` | Build from source |
+| Linux, 64-bit ARM | `.tar.gz`, `musl` | The [Snap Store](#install-the-desktop-app-from-the-snap-store) |
 | Windows, 64-bit Intel/AMD | `.zip` | `.msi` installer |
 
 Extract a command-line download and place `ferrocrypt` (`ferrocrypt.exe` on

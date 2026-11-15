@@ -465,7 +465,10 @@ pub(crate) fn checked_manifest_len(
 /// every cross-entry invariant `parse_manifest_bytes` enforces: FCA
 /// path grammar per entry, `Directory` `size == 0`,
 /// `manifest.total_file_bytes` equal to the sum of `File` entry sizes,
-/// and `validate_manifest_tree` shape rules. Pairs with
+/// and `validate_manifest_tree` shape rules. The root name, kind, and
+/// mode are not written: the reader derives them from the entries, so
+/// the manifest's own copies must equal what that validator derives,
+/// and a mismatch is [`CryptoError::InternalInvariant`]. Pairs with
 /// `checked_manifest_len` (which covers per-entry mode / byte caps and
 /// TLV canonicality).
 fn validate_manifest_for_write(
@@ -500,7 +503,18 @@ fn validate_manifest_for_write(
             reason: TOTAL_FILE_BYTES_MISMATCH,
         });
     }
-    let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
+
+    let (root_name, root_is_file, root_mode) =
+        validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
+    if root_name != manifest.root_name
+        || root_is_file != manifest.root_is_file
+        || root_mode != manifest.root_mode
+    {
+        return Err(crate::error::internal_invariant!(
+            "manifest root disagrees with its entries"
+        ));
+    }
+
     Ok(())
 }
 
@@ -1568,6 +1582,52 @@ mod tests {
                 reason: TOTAL_FILE_BYTES_MISMATCH
             }
         ));
+    }
+
+    /// `serialize_manifest` rejects a `Manifest` whose root name, kind,
+    /// or mode differs from what the entries say, each on its own,
+    /// since the reader derives all three from the entries.
+    #[test]
+    fn serialize_manifest_rejects_root_fields_that_disagree_with_its_entries() {
+        let file_root = Manifest {
+            entries: vec![make_entry("hello.txt", ArchiveEntryKind::File, 13, 0o644)],
+            total_file_bytes: 13,
+            root_name: OsString::from("hello.txt"),
+            root_is_file: true,
+            root_mode: 0o644,
+        };
+        let directory_root = Manifest {
+            entries: vec![
+                make_entry("photos", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("photos/a.jpg", ArchiveEntryKind::File, 4, 0o644),
+            ],
+            total_file_bytes: 4,
+            root_name: OsString::from("photos"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let drifts: [fn(&mut Manifest); 3] = [
+            |m| m.root_name = OsString::from("other"),
+            |m| m.root_is_file = !m.root_is_file,
+            |m| m.root_mode = 0o600,
+        ];
+
+        for consistent in [file_root, directory_root] {
+            serialize_manifest(&consistent, ArchiveLimits::default())
+                .expect("root fields that match the entries are accepted");
+            for drift in drifts {
+                let mut manifest = consistent.clone();
+                drift(&mut manifest);
+                let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        CryptoError::InternalInvariant("manifest root disagrees with its entries")
+                    ),
+                    "expected the root invariant, got {err}"
+                );
+            }
+        }
     }
 
     /// `serialize_manifest` rejects a `Manifest` whose `File` entry

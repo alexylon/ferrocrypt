@@ -90,6 +90,10 @@ pub struct Manifest {
     /// Cached `mode` of the root entry. Captured during
     /// `validate_manifest_tree` so the directory-mode apply step does
     /// not re-scan up to 250k entries on every extraction.
+    ///
+    /// The three root fields are not written: a reader derives them from
+    /// `entries`, and the writer gate refuses a manifest whose own copies
+    /// differ from what the entries say.
     pub root_mode: u32,
 }
 

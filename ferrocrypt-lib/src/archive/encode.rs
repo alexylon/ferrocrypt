@@ -64,7 +64,9 @@ use crate::fs::paths::{input_leaf_name, unsupported_file_type_error};
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
-use super::format::{checked_entry_wire_len, copy_exact_n, serialize_manifest, write_fca_header};
+use super::format::{
+    FCA_HEADER_SIZE, checked_entry_wire_len, copy_exact_n, serialize_manifest, write_fca_header,
+};
 use super::limits::{
     ArchiveLimits, enforce_entry_count_cap, enforce_manifest_len_cap, enforce_per_entry_caps,
     enforce_total_bytes_cap, entry_count_cap_error, manifest_len_cap_error,
@@ -1205,6 +1207,14 @@ pub(crate) fn prepare_archive(
 }
 
 impl PreparedArchive {
+    /// The number of bytes [`Self::write_to`] writes: FCA header, serialized
+    /// manifest, and every file's content. Saturates rather than overflows.
+    pub(crate) fn stream_len(&self) -> u64 {
+        (FCA_HEADER_SIZE as u64)
+            .saturating_add(u64::from(self.manifest_len))
+            .saturating_add(self.manifest.total_file_bytes)
+    }
+
     /// Writes the prepared archive to `writer`: FCA header, serialized
     /// manifest, and file contents in canonical manifest order. File contents
     /// are read from the retained source. Returns the writer for finalization.
@@ -1741,6 +1751,24 @@ mod tests {
         let final_path = round_trip(&src_file, out.path());
         assert_eq!(final_path, out.path().join("hello.txt"));
         assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
+    }
+
+    #[test]
+    fn stream_len_is_what_write_to_writes() {
+        let src = tempfile::TempDir::new().unwrap();
+        let file = src.path().join("one.bin");
+        fs::write(&file, vec![7u8; 70_000]).unwrap();
+        let dir = src.path().join("tree");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        fs::write(dir.join("sub").join("empty"), b"").unwrap();
+
+        for input in [&file, &dir] {
+            let prepared = prepare_archive(input, ArchiveLimits::default()).unwrap();
+            let expected = prepared.stream_len();
+            let written = prepared.write_to(Vec::new()).unwrap();
+            assert_eq!(expected, written.len() as u64, "{}", input.display());
+        }
     }
 
     /// Files created beneath the source root after [`prepare_archive`]

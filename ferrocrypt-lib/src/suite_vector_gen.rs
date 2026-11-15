@@ -252,6 +252,7 @@ fn build_crafted_fcr(
         Some(&cases.join(name)),
         "suite",
         &built,
+        &|_| {},
     )?;
     Ok(())
 }

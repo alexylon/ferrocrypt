@@ -481,6 +481,9 @@ export component AppWindow inherits Window {
     in-out property <string> status-err;
     in-out property <bool> hide-password: true;
     in-out property <bool> is-working: false;
+    // How much of the encrypted file an operation has handled, from 0 to 1;
+    // negative while that is not known, such as during key derivation.
+    in-out property <float> progress: -1;
     in-out property <bool> combined-picker: false;
     // True where a mouse selection is copied to the selection clipboard
     // (X11 and Wayland).
@@ -1362,6 +1365,21 @@ export component AppWindow inherits Window {
             border-color: status-err != "" ? Theme.notify-error-border : conflict-warning != "" ? Theme.notify-warning-border : (status-ok != "" || show-ready) ? Theme.notify-success-border : transparent;
             animate background { duration: Theme.dur-slow; }
             animate border-color { duration: Theme.dur-slow; }
+            // Keeps the progress fill inside the rounded corners.
+            clip: true;
+
+            // Fills from the left, behind the text, as the operation goes.
+            if is-working && progress >= 0: Rectangle {
+                x: 0;
+                width: parent.width * clamp(progress, 0, 1);
+                background: Theme.notify-success-border;
+                accessible-role: progress-indicator;
+                accessible-label: "Progress";
+                accessible-value: clamp(progress, 0, 1);
+                accessible-value-minimum: 0;
+                accessible-value-maximum: 1;
+                animate width { duration: Theme.dur-slow; }
+            }
 
             // Full height, so a single line always has room to render even
             // when the bar is shrunk to its minimum; the padding lives in the

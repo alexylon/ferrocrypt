@@ -158,8 +158,11 @@ between pre-releases.
 The `semver` job in `.github/workflows/rust.yml` freezes the library's public
 API: on every push and on every release, it refuses any incompatible change
 since the newest release tag before the commit. A version that changes the API
-on purpose, such as `0.4.0` after `0.3.x`, needs that job's
-`--release-type patch` changed to `--release-type major` first. For a `0.x`
+on purpose, such as `0.4.0` after `0.3.x`, needs both of that job's checks run
+with `--release-type major` first: the tag check's `--release-type patch`
+changes, and the crates.io check, which has none, gets one. Once that version
+is tagged, return the tag check to `patch` and remove the flag from the
+crates.io check, so the job refuses incompatible changes again. For a `0.x`
 version, cargo-semver-checks counts a change of the second number, such as
 `0.3` to `0.4`, as major.
 

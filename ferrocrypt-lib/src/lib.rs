@@ -328,7 +328,8 @@ impl std::fmt::Display for AuthenticatedRecipientMode {
 ///
 /// [`std::fmt::Display`] provides user-facing text. Match on variants for
 /// localization or other custom presentation, including a wildcard arm for
-/// future variants. Events report phases, not byte counts or percentages.
+/// future variants. Most events report the phase an operation enters;
+/// [`Self::BytesProcessed`] reports how far the payload phase has come.
 ///
 /// This enum deliberately does not implement `Copy`: future variants may
 /// carry owned data such as entry paths. Payloads remain `Eq`-comparable;
@@ -360,18 +361,43 @@ pub enum ProgressEvent {
     /// does not emit a nested [`Self::DerivingPassphraseWrapKey`] inside
     /// keygen; this event already signals the long pause.
     GeneratingKeyPair,
+    /// How many bytes of the encrypted `.fcr` file the payload phase has
+    /// handled. When encrypting, `done` counts the bytes written and `total`
+    /// is the size the finished file will have; when decrypting, `done`
+    /// counts the bytes read and `total` is the file's size when the payload
+    /// phase began, so the first `done` is the length of everything before
+    /// the payload, which was read earlier.
+    ///
+    /// Emitted after [`Self::Encrypting`] or [`Self::Decrypting`]: once when
+    /// the payload phase begins, then each time `done` reaches a further
+    /// whole percent of `total`, so one operation emits at most 101. Within
+    /// one operation every event carries the same nonzero `total`, and
+    /// `done` never decreases and never exceeds it. An operation whose
+    /// payload is handled to the end emits `done == total` last. The final
+    /// durability flush and commit still follow that event, and the
+    /// operation can still fail. A decryption that cannot read its input's
+    /// size emits no `BytesProcessed` events.
+    #[non_exhaustive]
+    BytesProcessed {
+        /// Bytes of the `.fcr` file handled so far.
+        done: u64,
+        /// Bytes of the `.fcr` file the operation handles in all.
+        total: u64,
+    },
 }
 
 impl std::fmt::Display for ProgressEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let msg = match self {
-            Self::DerivingPassphraseWrapKey => "Deriving passphrase key\u{2026}",
-            Self::UnlockingPrivateKey => "Unlocking private key\u{2026}",
-            Self::Encrypting => "Encrypting\u{2026}",
-            Self::Decrypting => "Decrypting\u{2026}",
-            Self::GeneratingKeyPair => "Generating key pair\u{2026}",
-        };
-        f.write_str(msg)
+        match self {
+            Self::DerivingPassphraseWrapKey => f.write_str("Deriving passphrase key\u{2026}"),
+            Self::UnlockingPrivateKey => f.write_str("Unlocking private key\u{2026}"),
+            Self::Encrypting => f.write_str("Encrypting\u{2026}"),
+            Self::Decrypting => f.write_str("Decrypting\u{2026}"),
+            Self::GeneratingKeyPair => f.write_str("Generating key pair\u{2026}"),
+            Self::BytesProcessed { done, total } => {
+                write!(f, "{}%", progress::percent(*done, *total))
+            }
+        }
     }
 }
 
@@ -436,6 +462,7 @@ mod format;
 mod fs;
 mod key;
 mod passphrase;
+mod progress;
 mod protocol;
 mod recipient;
 
@@ -609,6 +636,10 @@ mod tests {
         assert_eq!(
             ProgressEvent::GeneratingKeyPair.to_string(),
             "Generating key pair\u{2026}"
+        );
+        assert_eq!(
+            ProgressEvent::BytesProcessed { done: 2, total: 3 }.to_string(),
+            "66%"
         );
     }
 

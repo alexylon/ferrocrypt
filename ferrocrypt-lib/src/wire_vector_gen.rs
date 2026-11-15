@@ -1143,6 +1143,7 @@ fn build_fcr(
         Some(&staging.path().join("out.fcr")),
         "wire",
         &built,
+        &|_| {},
     )?;
     Ok(BuiltFcr {
         bytes: fs::read(&written).expect("read built fcr"),

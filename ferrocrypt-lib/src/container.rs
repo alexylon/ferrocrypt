@@ -37,9 +37,10 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::ProgressEvent;
 use crate::archive;
 use crate::crypto::keys::{HeaderKey, PayloadKey};
-use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
+use crate::crypto::stream::{STREAM_NONCE_SIZE, ciphertext_len, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
@@ -47,6 +48,7 @@ use crate::format::{
 };
 use crate::fs::atomic;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, parent_or_cwd, reject_occupied};
+use crate::progress::{ByteProgress, ProgressWriter};
 use crate::recipient::{self, RecipientEntry};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
@@ -628,12 +630,17 @@ pub(crate) fn resolve_encrypted_output_path(
 /// output path rejects with `CryptoError::InvalidInput` before any
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.
+///
+/// Reports [`ProgressEvent::BytesProcessed`] to `on_event` from the moment
+/// the staged file exists, counting every byte written to it against the
+/// size the finished file will have.
 pub(crate) fn write_encrypted_file(
     prepared: archive::PreparedArchive,
     output_dir: &Path,
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     write_encrypted_file_with_post_finalize(
         prepared,
@@ -641,25 +648,46 @@ pub(crate) fn write_encrypted_file(
         output_file,
         base_name,
         built,
-        |_| Ok(()),
-        |_| Ok(()),
+        on_event,
+        WriteSeams {
+            after_staging: |_| Ok(()),
+            after_finalize: |_| Ok(()),
+        },
     )
 }
 
-/// Implementation seam for two intervals a test needs to reach: after the
-/// staged file exists and before any ciphertext reaches it, and between
-/// finalization and the path returned to the caller. Production supplies
-/// no-ops; tests substitute the destination directory in the first and
-/// replace the final entry in the second.
-fn write_encrypted_file_with_post_finalize(
+/// Implementation seams of [`write_encrypted_file_with_post_finalize`] for
+/// two intervals a test needs to reach: after the staged file exists and
+/// before any ciphertext reaches it, and between finalization and the path
+/// returned to the caller. Production supplies no-ops; tests substitute the
+/// destination directory in the first and replace the final entry in the
+/// second.
+struct WriteSeams<S, F>
+where
+    S: FnOnce(&Path) -> std::io::Result<()>,
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    after_staging: S,
+    after_finalize: F,
+}
+
+fn write_encrypted_file_with_post_finalize<S, F>(
     prepared: archive::PreparedArchive,
     output_dir: &Path,
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
-    after_staging: impl FnOnce(&Path) -> std::io::Result<()>,
-    after_finalize: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<PathBuf, CryptoError> {
+    on_event: &dyn Fn(&ProgressEvent),
+    seams: WriteSeams<S, F>,
+) -> Result<PathBuf, CryptoError>
+where
+    S: FnOnce(&Path) -> std::io::Result<()>,
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let WriteSeams {
+        after_staging,
+        after_finalize,
+    } = seams;
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
 
@@ -687,7 +715,7 @@ fn write_encrypted_file_with_post_finalize(
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
-    let mut tmp = builder.tempfile_in(parent_or_cwd(&output_path))?;
+    let tmp = builder.tempfile_in(parent_or_cwd(&output_path))?;
     // Before any ciphertext on Linux/macOS: a destination replaced between
     // the anchor and this create is refused now rather than after the whole
     // file has been written.
@@ -695,13 +723,17 @@ fn write_encrypted_file_with_post_finalize(
     committed_dir.confirm_staged(&tmp)?;
     after_staging(tmp.path())?;
 
-    tmp.as_file_mut().write_all(&built.prefix_bytes)?;
-    tmp.as_file_mut().write_all(&built.header_bytes)?;
-    tmp.as_file_mut().write_all(&built.header_mac)?;
+    let header_len =
+        (built.prefix_bytes.len() + built.header_bytes.len() + built.header_mac.len()) as u64;
+    let file_len = header_len.saturating_add(ciphertext_len(prepared.stream_len()));
+    let mut staged = ProgressWriter::new(tmp, ByteProgress::start(0, file_len, on_event));
+    staged.write_all(&built.prefix_bytes)?;
+    staged.write_all(&built.header_bytes)?;
+    staged.write_all(&built.header_mac)?;
 
-    let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
+    let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, staged);
     let encrypt_writer = prepared.write_to(encrypt_writer)?;
-    let tmp = encrypt_writer.finish()?;
+    let tmp = encrypt_writer.finish()?.into_inner();
     atomic::sync_file_durable(tmp.as_file())?;
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -795,13 +827,16 @@ mod tests {
             Some(&output_path),
             "unused",
             &built,
-            |staged| {
-                let name = staged.file_name().expect("the staged file has a name");
-                std::fs::rename(staged, replacement.join(name))?;
-                std::fs::rename(&output_dir, &moved)?;
-                std::fs::rename(&replacement, &output_dir)
+            &|_| {},
+            WriteSeams {
+                after_staging: |staged: &Path| {
+                    let name = staged.file_name().expect("the staged file has a name");
+                    std::fs::rename(staged, replacement.join(name))?;
+                    std::fs::rename(&output_dir, &moved)?;
+                    std::fs::rename(&replacement, &output_dir)
+                },
+                after_finalize: |_| Ok(()),
             },
-            |_| Ok(()),
         )
         .expect_err("a staged file moved out of the anchored directory must refuse the commit");
 
@@ -852,10 +887,13 @@ mod tests {
             Some(&output_path),
             "unused",
             &built,
-            |_| Ok(()),
-            |_| {
-                std::fs::rename(&output_path, &committed_path)?;
-                std::fs::write(&output_path, b"replacement")
+            &|_| {},
+            WriteSeams {
+                after_staging: |_| Ok(()),
+                after_finalize: |_| {
+                    std::fs::rename(&output_path, &committed_path)?;
+                    std::fs::write(&output_path, b"replacement")
+                },
             },
         )
         .expect_err("the writer must reject a replaced return path");
@@ -915,8 +953,13 @@ mod tests {
             Some(&output_path),
             "unused",
             &built,
-            |_| Ok(()),
-            |_| std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o000)),
+            &|_| {},
+            WriteSeams {
+                after_staging: |_| Ok(()),
+                after_finalize: |_| {
+                    std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o000))
+                },
+            },
         );
         std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 

@@ -52,6 +52,7 @@ use crate::fs::paths::{
     KEY_FILE_LABEL, OUTPUT_LABEL, encryption_base_name, open_input_file, reject_occupied,
 };
 use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+use crate::progress::{ByteProgress, ProgressReader};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
@@ -276,7 +277,14 @@ pub(crate) fn encrypt<R: RecipientScheme>(
 
     on_event(&ProgressEvent::Encrypting);
 
-    write_encrypted_file(prepared, output_dir, output_file, &base_name, &built)
+    write_encrypted_file(
+        prepared,
+        output_dir,
+        output_file,
+        &base_name,
+        &built,
+        on_event,
+    )
 }
 
 /// Builds a `RecipientEntry` from a scheme-produced body, validating
@@ -625,6 +633,7 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
     // 10-12. STREAM payload decrypt + unarchive. Path / resource caps
     //        are enforced inside `unarchive` before any write.
     on_event(&ProgressEvent::Decrypting);
+    let encrypted_file = counting_reads(encrypted_file, on_event);
     let decrypt_reader = payload_decryptor(&payload_key, &stream_nonce, encrypted_file);
     unarchive(
         decrypt_reader,
@@ -632,6 +641,26 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
         archive_limits,
         incomplete_output_policy,
     )
+}
+
+/// Wraps the `.fcr` file, positioned at its first payload byte, so that every
+/// byte read from it is reported as [`ProgressEvent::BytesProcessed`] against
+/// the file's size. Progress is reported only where the position and the size
+/// can both be read: a decryption never fails over it.
+fn counting_reads<'a>(
+    mut encrypted_file: fs::File,
+    on_event: &'a dyn Fn(&ProgressEvent),
+) -> ProgressReader<'a, fs::File> {
+    use std::io::Seek;
+
+    let position = encrypted_file.stream_position();
+    let size = encrypted_file.metadata().map(|metadata| metadata.len());
+    let (done, total) = match (position, size) {
+        (Ok(position), Ok(size)) => (position, size),
+        _ => (0, 0),
+    };
+
+    ProgressReader::new(encrypted_file, ByteProgress::start(done, total, on_event))
 }
 
 /// Verifies that the classified file mode matches the credential scheme's

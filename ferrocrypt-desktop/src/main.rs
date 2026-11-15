@@ -98,6 +98,14 @@ const _: () =
     assert!(ORDINARY_FILE_NOTE.is_ascii() && ORDINARY_FILE_NOTE.len() < STATUS_ERROR_BUDGET);
 const _: () = assert!(OWN_NAME_NOTE.is_ascii() && OWN_NAME_NOTE.len() < STATUS_ERROR_BUDGET);
 
+/// The `progress` value in app.slint while the share of the file handled is
+/// not known.
+const NO_PROGRESS: f32 = -1.0;
+
+/// Status once every byte of the file is handled: the flush to disk and the
+/// final rename still follow.
+const FINISHING: &str = "Finishing\u{2026}";
+
 // Slint app modes — must match the `mode` property values in app.slint
 const MODE_PASSPHRASE_ENCRYPT: i32 = 0;
 const MODE_PASSPHRASE_DECRYPT: i32 = 1;
@@ -518,6 +526,7 @@ fn main() {
             };
 
             app.set_is_working(true);
+            app.set_progress(NO_PROGRESS);
             app.set_status_ok("".into());
             app.set_status_err("".into());
             app.set_conflict_warning("".into());
@@ -540,11 +549,14 @@ fn main() {
                     let on_event = {
                         let weak = weak.clone();
                         move |event: &ProgressEvent| {
-                            let msg = event.to_string();
+                            let (status, progress) = progress_display(event);
                             let weak = weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = weak.upgrade() {
-                                    app.set_status_ok(msg.into());
+                                    if let Some(status) = status {
+                                        app.set_status_ok(status.into());
+                                    }
+                                    app.set_progress(progress);
                                 }
                             });
                         }
@@ -574,6 +586,7 @@ fn main() {
                     let _ = slint::invoke_from_event_loop(move || {
                         let Some(app) = weak.upgrade() else { return };
                         app.set_is_working(false);
+                        app.set_progress(NO_PROGRESS);
 
                         match result {
                             Ok(output) => {
@@ -628,6 +641,7 @@ fn main() {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(app) = panic_weak.upgrade() {
                             app.set_is_working(false);
+                            app.set_progress(NO_PROGRESS);
                             app.set_status_ok("".into());
                             app.set_status_err(
                                 "Operation failed unexpectedly (internal error)".into(),
@@ -1017,6 +1031,20 @@ fn elide_result_path(msg: &str) -> String {
         }
     }
     msg.to_string()
+}
+
+/// What a progress event shows: the status text, when the event changes it,
+/// and the share of the file handled, or [`NO_PROGRESS`].
+fn progress_display(event: &ProgressEvent) -> (Option<String>, f32) {
+    match *event {
+        // The library never reports a zero total; one would mean no share.
+        ProgressEvent::BytesProcessed { total: 0, .. } => (None, NO_PROGRESS),
+        ProgressEvent::BytesProcessed { done, total, .. } => {
+            let status = (done == total).then(|| FINISHING.to_string());
+            (status, (done as f64 / total as f64) as f32)
+        }
+        _ => (Some(event.to_string()), NO_PROGRESS),
+    }
 }
 
 /// Bounds an error message to the status bar's wrapped budget,
@@ -1446,6 +1474,49 @@ mod tests {
             !matches!(detect_mode_from_path(root.to_str().unwrap()), Ok(Some(_))),
             "a directory must not be offered as a decrypt mode"
         );
+    }
+
+    /// The status names each phase, then says "Finishing…" once the whole
+    /// file is handled; the bar follows the bytes in between.
+    #[test]
+    fn progress_events_drive_the_status_and_the_bar() {
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let input = dir.path().join("several-chunks.bin");
+        fs::write(&input, vec![0x2e; 300_000]).unwrap();
+
+        let shown = std::cell::RefCell::new(Vec::new());
+        run_operation(
+            Operation {
+                mode: MODE_PASSPHRASE_ENCRYPT,
+                input: &input,
+                output_dir: dir.path(),
+                save_as: None,
+                key_path: Path::new(""),
+                public_key: None,
+                kdf_params: Some(fast_kdf_params()),
+            },
+            Passphrase::new("desktop-progress-passphrase"),
+            &|event: &ProgressEvent| shown.borrow_mut().push(progress_display(event)),
+        )
+        .expect("encrypt");
+        let shown = shown.into_inner();
+
+        assert_eq!(
+            shown.first(),
+            Some(&(
+                Some("Deriving passphrase key\u{2026}".to_string()),
+                NO_PROGRESS
+            ))
+        );
+        assert_eq!(shown.last(), Some(&(Some(FINISHING.to_string()), 1.0)));
+
+        let counted: Vec<_> = shown[..shown.len() - 1]
+            .iter()
+            .filter(|(_, share)| *share >= 0.0)
+            .collect();
+        assert!(counted.len() > 2, "{shown:?}");
+        assert!(counted.iter().all(|(status, _)| status.is_none()));
+        assert!(counted.windows(2).all(|pair| pair[0].1 < pair[1].1));
     }
 
     /// Both `save_as` branches of `run_operation`, which the dispatch test
@@ -2300,6 +2371,36 @@ mod tests {
             status.accessible_label().as_deref(),
             Some("Something failed")
         );
+    }
+
+    /// The bar shows only while an operation counts the bytes of the file,
+    /// and tells assistive technology how far it has come.
+    #[test]
+    fn the_progress_bar_shows_only_while_bytes_are_counted() {
+        use i_slint_backend_testing::AccessibleRole;
+
+        let app = headless_app();
+        app.show().unwrap();
+        let bars = || {
+            app.root_element()
+                .query_descendants()
+                .match_accessible_role(AccessibleRole::ProgressIndicator)
+                .find_all()
+        };
+        assert!(bars().is_empty());
+
+        app.set_is_working(true);
+        assert!(bars().is_empty(), "key derivation has no share to show");
+
+        app.set_progress(0.25);
+        let shown = bars();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].accessible_label().as_deref(), Some("Progress"));
+        assert_eq!(shown[0].accessible_value().as_deref(), Some("0.25"));
+        assert_eq!(shown[0].accessible_value_maximum(), Some(1.0));
+
+        app.set_is_working(false);
+        assert!(bars().is_empty());
     }
 
     /// A headless platform for layout checks.

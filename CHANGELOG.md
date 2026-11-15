@@ -7,9 +7,11 @@ All notable changes to FerroCrypt are documented in this file.
 ### Added
 - **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
 - **`escape_path_for_display` renders a path for showing to a person.** It escapes control characters, text-direction characters, the line and paragraph separators, and invisible characters such as the zero-width space, and keeps every other character, so an application built on the library can show paths the way the CLI and desktop app do.
+- **Encryption and decryption now report progress.** The desktop app fills its status bar as the file is written or read, and the CLI shows a percentage on a terminal. The library reports it as `ProgressEvent::BytesProcessed`, which counts the bytes of the `.fcr` file and is sent once for each whole percent, so at most 101 times per operation. The password step before it, which can take several seconds, still shows none.
 - **The desktop app can now be used with the keyboard and with a screen reader.** Tab moves through the form's buttons, tabs, and fields, Space or Enter presses the focused one, and a ring shows the focus; before, its buttons could only be pressed with a mouse. Controls give a screen reader their names and states, and status messages are read out as they appear.
 
 ### Changed
+- **`ProgressEvent` now has a variant that carries data, `BytesProcessed { done, total }`, so its values can no longer be cast to integers with `as`.** This is an incompatible change to the library's API. Code that matches on `ProgressEvent` keeps compiling through its wildcard arm. A callback that prints every event now also prints a percentage, up to 101 times per operation; skip `BytesProcessed` there to keep the previous output.
 - **After a public-key encryption, the desktop app keeps the public key selected, so more files can go to the same recipient.** Its fingerprint stays on screen, and Reset clears both.
 
 ### Fixed

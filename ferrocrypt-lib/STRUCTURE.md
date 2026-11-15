@@ -17,10 +17,11 @@
    - [3.5 `container.rs`](#35-containerrs)
    - [3.6 `error.rs`](#36-errorrs)
    - [3.7 `passphrase.rs`](#37-passphrasers)
-   - [3.8 `fuzz_exports.rs`](#38-fuzz_exportsrs)
-   - [3.9 `suite_vector_gen.rs`](#39-suite_vector_genrs)
-   - [3.10 `wire_vector_gen.rs`](#310-wire_vector_genrs)
-   - [3.11 `wire_check_order/`](#311-wire_check_order)
+   - [3.8 `progress.rs`](#38-progressrs)
+   - [3.9 `fuzz_exports.rs`](#39-fuzz_exportsrs)
+   - [3.10 `suite_vector_gen.rs`](#310-suite_vector_genrs)
+   - [3.11 `wire_vector_gen.rs`](#311-wire_vector_genrs)
+   - [3.12 `wire_check_order/`](#312-wire_check_order)
 4. [`crypto/`](#4-crypto)
    - [4.1 `crypto/keys.rs`](#41-cryptokeysrs)
    - [4.2 `crypto/kdf.rs`](#42-cryptokdfrs)
@@ -175,6 +176,7 @@ ferrocrypt-lib/src/
 │   └── paths.rs
 │
 ├── passphrase.rs
+├── progress.rs
 ├── fuzz_exports.rs
 ├── suite_vector_gen.rs   (test-only)
 ├── wire_vector_gen.rs    (test-only)
@@ -369,7 +371,7 @@ It contains:
 - `read_encrypted_header`;
 - authenticated-header assembly;
 - structural container validation;
-- top-level `prefix || header || header_mac || payload` reading and writing.
+- top-level `prefix || header || header_mac || payload` reading and writing, with the byte progress of the writing.
 
 `container.rs` owns container assembly and parsing. Header MAC computation and verification go through the typed wrappers in `format.rs`; `container.rs` does not implement HMAC directly. It does not own Argon2id behavior, X25519 behavior, payload-stream cryptography, archive semantics, public key file formats, or private key file formats.
 
@@ -435,19 +437,23 @@ Public error names may be compatibility-oriented, but their display text must pr
 
 It wraps the passphrase text in a zeroizing buffer, prints redacted `Debug` output, and exposes the text only crate-internally. It contains no validation, parsing, or cryptography; the passphrase length rule is enforced by the operations that use the value.
 
-### 3.8 `fuzz_exports.rs`
+### 3.8 `progress.rs`
+
+`progress.rs` owns the byte progress of the payload phase: the counting behind `ProgressEvent::BytesProcessed`, the rule that reports each whole percent once, and the reader and writer adapters that count the `.fcr` bytes passing through them. `container.rs` counts the bytes written to the staged file against the size the finished file will have, and `protocol.rs` counts the bytes read from the input file against its size. Progress is reporting only: it never changes what an operation reads or writes, and an unknown size turns it off rather than failing the operation.
+
+### 3.9 `fuzz_exports.rs`
 
 `fuzz_exports.rs` exposes internal parser and validation entry points needed by fuzz targets.
 
 It is not part of the stable public API. It must not become an alternate implementation path for parsing, validation, cryptography, or archive handling.
 
-### 3.9 `suite_vector_gen.rs`
+### 3.10 `suite_vector_gen.rs`
 
 `suite_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the committed `testvectors/suite/` edge-case corpus. It needs crate internals (`container::build_encrypted_header`, recipient `wrap` helpers, TLV byte building) to craft fixtures the public writer refuses to produce; the corpus itself is verified through the public API by `tests/testvector_suite.rs` on every test run.
 
 It is compiled only for tests and must not grow non-generation logic.
 
-### 3.10 `wire_vector_gen.rs`
+### 3.11 `wire_vector_gen.rs`
 
 `wire_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the frozen `testvectors/wire/` conformance corpus (`FORMAT.md` §12.3), which is the public, cross-language contract — distinct from the `testvectors/suite/` corpus above, which is this codebase's own edge-case net and records Rust variant names §12.1 keeps out of the cross-language contract. Generation needs the same crate internals for the same reason, and runs under a fixed seed so regenerating without changing the generator leaves an empty diff. The default limit profile is read from the defaults of the four limit types, each destructured field by field, so a cap added to any of them stops the build until `limit-profiles.tsv` has a column for it; every other profile is that row with only the caps its cases need changed.
 
@@ -455,7 +461,7 @@ The module also owns the two replays §12.3 reserves for a crate-internal implem
 
 It is compiled only for tests and must not grow non-generation logic.
 
-### 3.11 `wire_check_order/`
+### 3.12 `wire_check_order/`
 
 `wire_check_order/` is a `#[cfg(test)]`-only module that checks the order claims of the `FORMAT.md` §12.3 evidence table against the committed corpus: that the `.fcr`, `public.key`, and `private.key` cases fix the order of every two checks their rows name whose order can decide a report. `mod.rs` holds the evidence model. A rejected case states that, of the checks its artifact breaks, one of its stored class comes first, and a pair is fixed when no order of the checks that agrees with every case reverses it. A reader may make two per-entry checks in one pass, one entry at a time, so a check of the stored class on an entry such a reader meets first fixes nothing about a check on a later entry. A reader meets the entries in a direction the list allows: the §3.3 checks front to back, as §3.3 finds each entry by reading the one before it, and each §3.7 per-entry check front to back or back to front, in a direction of its own. Each way of giving them directions is a family of readers; a family the cases rule out entirely is refuted, and every other family must fix every claimed pair. A reader may also make a check that the specification makes once over the whole recipient list, such as the mixing rules or the header-MAC work cap, on the entries it has met so far, in a pass of either direction: each case records where such readers first meet it, and a check of the stored class that such a reader can meet first fixes nothing about it. The reader the specification describes must report every stored class. `fcr.rs` holds the `.fcr` check list: which checks an artifact breaks, each evaluated on its own from the bytes as a reader that made it first would see it; the checks a credential decides, evaluated with the corpus credentials through `wire_vector_gen.rs`'s credential reader; and which checks one file can break together. A reader that makes a check before the check that guards a declared end may read past that end, and where the declared lengths disagree it may take the entry region from any of them or from the declared header alone, so each artifact is evaluated under every such reading; a walk stops at the first entry that runs past its region. A check that only some readings break, or that the mixing rules or the work cap judge on a list cut short, counts only for a case that stores its class, and a case whose specification reading breaks no check of the list must have a header the library itself reads and classifies without error. A separate test goes through every way a reader may arrange the per-entry checks into passes over the entries, each read in a direction its checks allow, with the §3.3 framing checks kept together in a pass front to back as §3.3 requires, and requires each one that agrees with the cases to agree with the specification. Two more require a case for each reader that interleaves checks in a way no order expresses: one that makes the mixing rules or the work cap on the entries met so far and meets them before an entry that breaks a check §3.7 orders first, and one that applies the work cap to the entries as it tries them, in any order, and meets a check made on the entry it tries first before the cap. A reader that declares capabilities, one or several, is modelled too, and may lose only the pairs and cases with a check they change; for a file of a newer outer-container version they add, every check but the magic and the kind is uncertain, the prefix length included, and such a file is not held to the library's header check. §3.7 leaves the checks §8 makes on a supplied `private.key` before its unlock unordered against the `.fcr` checks, and the list holds none of the key checks made after the unlock, so a case whose key the reader refuses for any reason but a wrong passphrase must break no check of the list. `public_key.rs` holds the `public.key` list of §7.1 and §7, and `private_key.rs` the `private.key` list of §8 once for each of its readers: validation, which applies no local cap and does not unlock, and the unlock, whose authentication it evaluates with the corpus credentials and leaves untried where the stored KDF parameters are outside the §2.2 bounds or ask for more work than the check spends. A key file has readings of its own: a reader may decode a string §7 step 4 refuses, take the internal checksum from the end of the payload with the key material declared or up to that checksum, read only one byte past the longest valid file or, for a `private.key`, past the lengths its header declares or past a fixed header that breaks a check of steps 0 to 7, as the staged read of this build does, or of steps 0 to 9, take every byte after `ext_bytes` as the wrapped secret, or judge the support of a type name that breaks the grammar. A test holds the extent that stops on steps 0 to 7 to the library's own staged read. The key lists evaluate each such reading apart and claim for it only the pairs a reader of it can break together. `mod.rs` holds the judgment of a stored type name: its grammar, which all three lists share, and its support, which the key lists share. The module is compiled only for tests and must not grow non-checking logic.
 
@@ -544,7 +550,7 @@ Common AEAD behavior is not duplicated in Argon2id recipients, X25519 recipients
 
 It contains:
 
-- payload chunk-size rules;
+- payload chunk-size rules, and the ciphertext length they give a plaintext length (`ciphertext_len`);
 - counter rules;
 - final-flag behavior;
 - payload encryptor reader/writer adapters;
@@ -1487,6 +1493,7 @@ Each security-sensitive concern has exactly one owner.
 | No-clobber commit (anchor, no-replace rename, link-or-claim fallback) and staged-entry create modes | `fs/commit.rs` |
 | Handle-relative decrypt promotion (Linux/macOS) | `archive/platform.rs` |
 | General filesystem path helpers | `fs/paths.rs` |
+| Payload byte progress (`ProgressEvent::BytesProcessed`) | `progress.rs` |
 | Public API translation | `api.rs` |
 | End-to-end operation flow | `protocol.rs` |
 
@@ -1518,6 +1525,7 @@ Dependency rules:
 
 - `format.rs` depends only on `error.rs` and the `crypto/` primitive layer (`crypto/mac` and `crypto/keys` for the typed `compute_header_mac` / `verify_header_mac` wrappers, plus the `STREAM_NONCE_SIZE` constant from `crypto/stream`); it does not depend on any higher-layer module.
 - `passphrase.rs` is a leaf: it depends on no other module in the crate, so any layer may consume it. `api.rs`, `protocol.rs`, `crypto/keys.rs`, `key/private.rs`, and `recipient/native/*` do.
+- `progress.rs` depends only on `ProgressEvent` in `lib.rs`. `container.rs` and `protocol.rs` use it.
 - `crypto/*` does not depend on `protocol.rs`, `archive/*`, or `fs/*`.
 - `recipient/native/*` does not call `container.rs` or `archive/*`.
 - `archive/*` does not know about recipients, keys, or encrypted-header structure.

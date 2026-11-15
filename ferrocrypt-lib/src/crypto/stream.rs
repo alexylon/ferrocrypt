@@ -48,6 +48,15 @@ const STREAM_CHUNK_COUNT_MAX: u64 = 1u64 << 32;
 /// buffer pre-allocation and the reader's refill loop.
 const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
+/// The ciphertext length [`EncryptWriter`] produces from `plaintext_len`
+/// bytes: one tag per chunk, where non-empty plaintext has one chunk per
+/// started [`BUFFER_SIZE`] bytes and empty plaintext a single tag-only chunk
+/// (`FORMAT.md` §5). Saturates rather than overflows.
+pub(crate) fn ciphertext_len(plaintext_len: u64) -> u64 {
+    let chunks = plaintext_len.div_ceil(BUFFER_SIZE as u64).max(1);
+    plaintext_len.saturating_add(chunks.saturating_mul(TAG_SIZE as u64))
+}
+
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
 /// later be downcast by `From<io::Error> for CryptoError`.
@@ -617,6 +626,23 @@ mod tests {
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         out
+    }
+
+    #[test]
+    fn ciphertext_len_matches_the_writer() {
+        for len in [
+            0,
+            1,
+            BUFFER_SIZE - 1,
+            BUFFER_SIZE,
+            BUFFER_SIZE + 1,
+            2 * BUFFER_SIZE,
+            2 * BUFFER_SIZE + 5,
+        ] {
+            let ciphertext = encrypt_to_vec(&vec![0x5a; len]);
+            assert_eq!(ciphertext_len(len as u64), ciphertext.len() as u64, "{len}");
+        }
+        assert_eq!(ciphertext_len(u64::MAX), u64::MAX);
     }
 
     /// Plaintext exactly equal to one chunk: per `FORMAT.md` §5,

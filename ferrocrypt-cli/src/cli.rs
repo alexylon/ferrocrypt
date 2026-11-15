@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Read, Write, stdin};
 use std::path::{Path, PathBuf};
 
@@ -5,8 +6,8 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use ferrocrypt::Passphrase;
 use ferrocrypt::{
     ArchiveLimits, CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
-    KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey,
-    default_encrypted_filename, escape_path_for_display, validate_private_key_file,
+    KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent,
+    PublicKey, default_encrypted_filename, escape_path_for_display, validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -572,6 +573,59 @@ fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
     );
 }
 
+/// Prints progress events to standard error. On a terminal, the line of the
+/// current phase is rewritten with the share of the `.fcr` file handled so
+/// far. Elsewhere, such as in a log, each phase gets a line of its own and the
+/// byte progress is left out.
+struct ProgressPrinter {
+    live: bool,
+    phase: RefCell<String>,
+    line_open: Cell<bool>,
+}
+
+impl ProgressPrinter {
+    fn new() -> Self {
+        Self {
+            live: io::stderr().is_terminal(),
+            phase: RefCell::default(),
+            line_open: Cell::new(false),
+        }
+    }
+
+    fn report(&self, event: &ProgressEvent) {
+        if matches!(event, ProgressEvent::BytesProcessed { .. }) {
+            if self.live {
+                eprint!("\r{} {event}", self.phase.borrow());
+                self.line_open.set(true);
+            }
+            return;
+        }
+
+        self.end_line();
+        if self.live {
+            eprint!("{event}");
+            self.line_open.set(true);
+            *self.phase.borrow_mut() = event.to_string();
+        } else {
+            eprintln!("{event}");
+        }
+    }
+
+    /// Ends a line left open for rewriting, so that what is printed next
+    /// starts on a line of its own.
+    fn end_line(&self) {
+        if self.line_open.replace(false) {
+            eprintln!();
+        }
+    }
+}
+
+impl Drop for ProgressPrinter {
+    fn drop(&mut self) {
+        self.end_line();
+    }
+}
+
 fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
     let private_exists = path_occupied(&output_dir.join(PRIVATE_KEY_FILENAME));
     let public_exists = path_occupied(&output_dir.join(PUBLIC_KEY_FILENAME));
@@ -754,9 +808,13 @@ fn run_encrypt(
         encryptor = encryptor.save_as(save_as_path);
     }
 
+    let progress = ProgressPrinter::new();
     let output = encryptor
-        .write(&input, target.library_output_dir(), |ev| eprintln!("{ev}"))?
+        .write(&input, target.library_output_dir(), |ev| {
+            progress.report(ev)
+        })?
         .output_path;
+    progress.end_line();
 
     print_result(true, &output, start.elapsed());
     Ok(())
@@ -779,6 +837,7 @@ fn run_decrypt(
         IncompleteOutputPolicy::DeleteOnError
     };
 
+    let progress = ProgressPrinter::new();
     let output = match Decryptor::open(&input)? {
         Decryptor::Passphrase(mut decryptor) => {
             if private_key.is_some() {
@@ -795,7 +854,7 @@ fn run_decrypt(
                 .incomplete_output_policy(policy);
             let passphrase = read_passphrase(false)?;
             decryptor
-                .decrypt(passphrase, &output_dir, |ev| eprintln!("{ev}"))?
+                .decrypt(passphrase, &output_dir, |ev| progress.report(ev))?
                 .output_path
         }
         Decryptor::PrivateKey(mut decryptor) => {
@@ -817,7 +876,7 @@ fn run_decrypt(
                 .decrypt(
                     PrivateKey::from_key_file(&private_key, passphrase),
                     &output_dir,
-                    |ev| eprintln!("{ev}"),
+                    |ev| progress.report(ev),
                 )?
                 .output_path
         }
@@ -827,6 +886,7 @@ fn run_decrypt(
             ));
         }
     };
+    progress.end_line();
 
     print_result(false, &output, start.elapsed());
     Ok(())

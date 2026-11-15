@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
-    KdfParams, KeyPairGenerator, KeyReadLimits, MAGIC, PrivateKey, PublicKey, probe_recipient_mode,
-    probe_recipient_mode_with_limits,
+    KdfParams, KeyPairGenerator, KeyReadLimits, MAGIC, PrivateKey, ProgressEvent, PublicKey,
+    probe_recipient_mode, probe_recipient_mode_with_limits,
 };
 use ferrocrypt_test_support::{
     TEST_FAST_KDF_MEM_COST, fast_keypair_generator, fast_passphrase_encryptor,
@@ -2288,6 +2288,88 @@ fn encryptor_with_public_keys_stops_at_the_structural_recipient_ceiling() {
     // reach `write`, which is a separate, caller-configurable cap.
     let at_ceiling: Vec<PublicKey> = (0..usize::from(ceiling)).map(|_| key.clone()).collect();
     Encryptor::with_public_keys(at_ceiling).expect("a list at the ceiling must construct");
+}
+
+/// Checks the byte progress an operation reported against what
+/// `ProgressEvent::BytesProcessed` documents: it follows `phase` and ends the
+/// events, stays within 101 events, counts the bytes of a `.fcr` file of
+/// `file_len` bytes, reports a further whole percent each time, and ends at
+/// the total. Returns the first `done`.
+fn check_byte_progress(events: &[ProgressEvent], phase: &ProgressEvent, file_len: u64) -> u64 {
+    let phase_at = events
+        .iter()
+        .position(|event| event == phase)
+        .unwrap_or_else(|| panic!("no {phase:?} in {events:?}"));
+    let (before, after) = events.split_at(phase_at + 1);
+    assert!(
+        !before
+            .iter()
+            .any(|event| matches!(event, ProgressEvent::BytesProcessed { .. })),
+        "byte progress before {phase:?}: {events:?}"
+    );
+
+    let counts: Vec<(u64, u64)> = after
+        .iter()
+        .map(|event| match event {
+            ProgressEvent::BytesProcessed { done, total, .. } => (*done, *total),
+            other => panic!("{other:?} after the byte progress began"),
+        })
+        .collect();
+    assert!(!counts.is_empty() && counts.len() <= 101, "{counts:?}");
+
+    let percent = |done: u64| u128::from(done) * 100 / u128::from(file_len);
+    for pair in counts.windows(2) {
+        assert!(percent(pair[0].0) < percent(pair[1].0), "{counts:?}");
+    }
+    for (_, total) in &counts {
+        assert_eq!(*total, file_len);
+    }
+    assert_eq!(counts.last().map(|(done, _)| *done), Some(file_len));
+
+    counts[0].0
+}
+
+#[test]
+fn byte_progress_counts_the_fcr_file_from_first_byte_to_last() {
+    let work = fresh_workspace("byte_progress");
+    let file = work.join("several-chunks.bin");
+    fs::write(&file, vec![0x3c; 5 * 65_536 + 123]).unwrap();
+    let tree = work.join("tree");
+    fs::create_dir_all(tree.join("nested")).unwrap();
+    fs::write(tree.join("a.bin"), vec![0x11; 200_000]).unwrap();
+    fs::write(tree.join("nested").join("b.txt"), b"bravo").unwrap();
+    fs::write(tree.join("nested").join("empty"), b"").unwrap();
+
+    for (name, input) in [("file", &file), ("tree", &tree)] {
+        let out_dir = work.join(format!("{name}-encrypted"));
+        fs::create_dir_all(&out_dir).unwrap();
+        let events = std::cell::RefCell::new(Vec::new());
+        let outcome = fast_passphrase_encryptor(pass())
+            .write(input, &out_dir, |event| {
+                events.borrow_mut().push(event.clone())
+            })
+            .expect("encrypt");
+        let file_len = fs::metadata(&outcome.output_path).unwrap().len();
+        let first = check_byte_progress(&events.take(), &ProgressEvent::Encrypting, file_len);
+        assert_eq!(first, 0, "{name}: encryption counts from the first byte");
+
+        let restore = work.join(format!("{name}-restored"));
+        fs::create_dir_all(&restore).unwrap();
+        let Decryptor::Passphrase(decryptor) = Decryptor::open(&outcome.output_path).unwrap()
+        else {
+            panic!("expected a passphrase decryptor");
+        };
+        decryptor
+            .decrypt(pass(), &restore, |event| {
+                events.borrow_mut().push(event.clone())
+            })
+            .expect("decrypt");
+        let first = check_byte_progress(&events.take(), &ProgressEvent::Decrypting, file_len);
+        assert!(
+            0 < first && first < file_len,
+            "{name}: decryption starts after the header it already read, at {first}"
+        );
+    }
 }
 
 #[test]

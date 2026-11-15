@@ -705,32 +705,31 @@ enum PromotedIdentity {
 /// swapped in after the confirmation. A confirmed identity is returned
 /// as [`PromotedIdentity::Confirmed`] whatever the chmod then does:
 /// the confirmation is about identity, not the mode, and step 16 must
-/// not fail the extraction anyway. An identity that was expected but is
-/// unavailable — on either side: it could not be read, or it carries
-/// no information — skips the mode application instead of applying the
-/// mode to an unconfirmed entry; the output keeps its restrictive
-/// staged mode, the failure mode `FORMAT.md` §9.11 step 16 names
-/// acceptable.
+/// not fail the extraction anyway. Where either side has no identity —
+/// no staged handle was held, or an identity could not be read or
+/// carries no information — the mode application is skipped instead of
+/// applying the mode to an unconfirmed entry; the output keeps its
+/// restrictive staged mode, the failure mode `FORMAT.md` §9.11 step 16
+/// names acceptable.
 fn apply_root_directory_mode(
     output_handle: &Dir,
     manifest: &Manifest,
     staged: &StagedIdentity,
 ) -> Result<PromotedIdentity, CryptoError> {
-    if matches!(staged, StagedIdentity::Unavailable) {
+    let StagedIdentity::Known(staged_id) = staged else {
         return Ok(PromotedIdentity::Unconfirmed);
-    }
+    };
+
     let root_name_str = manifest_root_name_str(manifest)?;
     let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
-    if let StagedIdentity::Known(staged_id) = staged {
-        let Some(found) = platform::dir_object_id(&root_dir)? else {
-            return Ok(PromotedIdentity::Unconfirmed);
-        };
-        require_staged_identity(*staged_id, found, &manifest.root_name)?;
-        let _ = platform::chmod_dir_handle(root_dir, manifest.root_mode);
-        return Ok(PromotedIdentity::Confirmed);
-    }
-    platform::chmod_dir_handle(root_dir, manifest.root_mode)?;
-    Ok(PromotedIdentity::Unconfirmed)
+    let Some(found) = platform::dir_object_id(&root_dir)? else {
+        return Ok(PromotedIdentity::Unconfirmed);
+    };
+
+    require_staged_identity(*staged_id, found, &manifest.root_name)?;
+    let _ = platform::chmod_dir_handle(root_dir, manifest.root_mode);
+
+    Ok(PromotedIdentity::Confirmed)
 }
 
 /// File-root parallel of [`apply_root_directory_mode`]. Opens the
@@ -754,20 +753,19 @@ fn apply_root_file_mode(
     manifest: &Manifest,
     staged: &StagedIdentity,
 ) -> Result<PromotedIdentity, CryptoError> {
-    if matches!(staged, StagedIdentity::Unavailable) {
+    let StagedIdentity::Known(staged_id) = staged else {
         return Ok(PromotedIdentity::Unconfirmed);
-    }
+    };
+
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
-    if let StagedIdentity::Known(staged_id) = staged {
-        let Some(found) = platform::file_object_id(&file)? else {
-            return Ok(PromotedIdentity::Unconfirmed);
-        };
-        require_staged_identity(*staged_id, found, &manifest.root_name)?;
-        let _ = platform::chmod_file_handle(&file, manifest.root_mode);
-        return Ok(PromotedIdentity::Confirmed);
-    }
-    platform::chmod_file_handle(&file, manifest.root_mode)?;
-    Ok(PromotedIdentity::Unconfirmed)
+    let Some(found) = platform::file_object_id(&file)? else {
+        return Ok(PromotedIdentity::Unconfirmed);
+    };
+
+    require_staged_identity(*staged_id, found, &manifest.root_name)?;
+    let _ = platform::chmod_file_handle(&file, manifest.root_mode);
+
+    Ok(PromotedIdentity::Confirmed)
 }
 
 /// Confirms an object found at the promoted root's final name is the
@@ -1555,18 +1553,17 @@ impl CleanupOutcome {
 
 /// Identity of the staged root, as the steps after promotion see it.
 ///
-/// The two ways it can be missing are kept apart because they say
-/// different things about the run. [`Self::NoHandle`] is a record
-/// without a handle, which no extraction produces: the staged handle
-/// is held on every platform for the whole run.
+/// The two ways it can be missing are named apart because they say
+/// different things about the run, although every step handles them
+/// alike. [`Self::NoHandle`] stands for a record without a handle, or
+/// no record at all, neither of which an extraction produces: the
+/// staged handle is held on every platform for the whole run.
 /// [`Self::Unavailable`] means a handle was held but the filesystem
 /// either refused to describe the object behind it or described it
 /// with an all-zero identifier, which carries no information. Neither
-/// fails the extraction: step 17 skips its comparison for both — see
-/// [`StagedIdentity::known`] — while step 16 tells them apart, skipping
-/// the root-mode application for [`Self::Unavailable`] and applying it
-/// under the no-follow guards alone for [`Self::NoHandle`] (see
-/// [`apply_root_directory_mode`]).
+/// fails the extraction or confirms the commit: step 17 skips its
+/// comparison for both — see [`StagedIdentity::known`] — and step 16
+/// applies no root mode for either (see [`apply_root_directory_mode`]).
 enum StagedIdentity {
     /// Read from the retained staged handle.
     Known(ObjectId),
@@ -3692,7 +3689,9 @@ mod tests {
     /// same race the multithreaded path would observe).
     ///
     /// Closes the §12 "attacker replaces staged root with symlink"
-    /// case at the apply-root-mode site specifically.
+    /// case at the apply-root-mode site specifically. The staged
+    /// identity is the symlink's target, so the rejection comes from the
+    /// no-follow walk, not from the identity comparison.
     #[cfg(unix)]
     #[test]
     fn apply_root_directory_mode_rejects_symlink_at_renamed_root() {
@@ -3714,8 +3713,9 @@ mod tests {
         };
 
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err =
-            apply_root_directory_mode(&handle, &manifest, &StagedIdentity::NoHandle).unwrap_err();
+        let target = platform::open_dir_at_rel(&handle, Path::new("real_dir")).unwrap();
+        let staged = StagedIdentity::Known(platform::dir_object_id(&target).unwrap().unwrap());
+        let err = apply_root_directory_mode(&handle, &manifest, &staged).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
@@ -3727,7 +3727,8 @@ mod tests {
     /// and `apply_root_file_mode`: the chmod step must reject via
     /// `open_file_nofollow`'s no-follow open. Inject the post-rename
     /// state directly (deterministic test of the same race the
-    /// multithreaded path would observe).
+    /// multithreaded path would observe). As there, the staged identity
+    /// is the symlink's target.
     #[cfg(unix)]
     #[test]
     fn apply_root_file_mode_rejects_symlink_at_renamed_root() {
@@ -3742,7 +3743,9 @@ mod tests {
 
         let manifest = single_file_manifest("hello.txt", b"x");
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err = apply_root_file_mode(&handle, &manifest, &StagedIdentity::NoHandle).unwrap_err();
+        let target = platform::open_file_nofollow(&handle, OsStr::new("real_file")).unwrap();
+        let staged = StagedIdentity::Known(platform::file_object_id(&target).unwrap().unwrap());
+        let err = apply_root_file_mode(&handle, &manifest, &staged).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
@@ -3763,7 +3766,10 @@ mod tests {
 
         let manifest = single_file_manifest("hello.txt", b"x");
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err = apply_root_file_mode(&handle, &manifest, &StagedIdentity::NoHandle).unwrap_err();
+        let staged_file = platform::create_file_at(&handle, OsStr::new("staged"), 0o600).unwrap();
+        let staged =
+            StagedIdentity::Known(platform::file_object_id(&staged_file).unwrap().unwrap());
+        let err = apply_root_file_mode(&handle, &manifest, &staged).unwrap_err();
         assert!(
             format!("{err}").contains("Extraction path is no longer a regular file"),
             "expected regular-file rejection, got: {err}",
@@ -3787,6 +3793,8 @@ mod tests {
         fs::create_dir(orig.join("root")).unwrap();
 
         let handle = platform::open_anchor(&orig).unwrap();
+        let root = platform::open_dir_at_rel(&handle, Path::new("root")).unwrap();
+        let staged = StagedIdentity::Known(platform::dir_object_id(&root).unwrap().unwrap());
 
         // Swap: move the extraction directory aside and mint a
         // replacement holding a same-named victim.
@@ -3803,7 +3811,8 @@ mod tests {
             root_is_file: false,
             root_mode: 0o500,
         };
-        apply_root_directory_mode(&handle, &manifest, &StagedIdentity::NoHandle).unwrap();
+        let confirmed = apply_root_directory_mode(&handle, &manifest, &staged).unwrap();
+        assert!(matches!(confirmed, PromotedIdentity::Confirmed));
 
         let moved_mode = fs::metadata(moved.join("root"))
             .unwrap()
@@ -3835,6 +3844,8 @@ mod tests {
         fs::write(orig.join("hello.txt"), b"extracted").unwrap();
 
         let handle = platform::open_anchor(&orig).unwrap();
+        let root = platform::open_file_nofollow(&handle, OsStr::new("hello.txt")).unwrap();
+        let staged = StagedIdentity::Known(platform::file_object_id(&root).unwrap().unwrap());
 
         let moved = tmp.path().join("moved");
         fs::rename(&orig, &moved).unwrap();
@@ -3846,7 +3857,8 @@ mod tests {
         manifest.entries[0].mode = 0o400;
         manifest.root_mode = 0o400;
 
-        apply_root_file_mode(&handle, &manifest, &StagedIdentity::NoHandle).unwrap();
+        let confirmed = apply_root_file_mode(&handle, &manifest, &staged).unwrap();
+        assert!(matches!(confirmed, PromotedIdentity::Confirmed));
 
         let moved_mode = fs::metadata(moved.join("hello.txt"))
             .unwrap()
@@ -5044,58 +5056,72 @@ mod tests {
     /// `DeleteOnError` cleanup. The state a handle-less record stands
     /// for is skipped on the same terms. Step 16's side of the same
     /// states is pinned by
-    /// `an_unavailable_staged_identity_skips_the_mode_application`.
+    /// `a_missing_staged_identity_skips_the_mode_application`.
     #[test]
     fn a_staged_identity_that_cannot_be_read_is_skipped() {
         assert!(StagedIdentity::Unavailable.known().is_none());
         assert!(StagedIdentity::NoHandle.known().is_none());
     }
 
-    /// The two no-identity states part ways at step 16. `Unavailable`
-    /// means a confirmation was expected and the evidence for it is
-    /// missing — unreadable, or an all-zero identifier — so the mode
-    /// application is skipped and the output keeps its restrictive
-    /// staged mode: applying the archive-chosen mode to an entry the
-    /// run could not confirm is the hard-link escalation the
-    /// comparison exists to stop. `NoHandle`, which no extraction
-    /// produces, expects no confirmation, so the mode is applied under
-    /// the no-follow guards alone. Neither ratifies the commit.
+    /// Without a staged identity to confirm against — unreadable, an
+    /// all-zero identifier, or no handle held at all — step 16 applies no
+    /// mode and the output keeps its restrictive staged mode: applying
+    /// the archive-chosen mode to an entry the run could not confirm is
+    /// the hard-link escalation the comparison exists to stop. Neither
+    /// state ratifies the commit.
     ///
     /// Linux/macOS only: the assertions read Unix mode bits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn an_unavailable_staged_identity_skips_the_mode_application() {
+    fn a_missing_staged_identity_skips_the_mode_application() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let handle = platform::open_anchor(tmp.path()).unwrap();
         let _file = platform::create_file_at(&handle, OsStr::new("f.txt"), 0o600).unwrap();
-        let mut manifest = single_file_manifest("f.txt", b"");
-        manifest.root_mode = 0o666;
-        manifest.entries[0].mode = 0o666;
-
-        let unread = apply_root_file_mode(&handle, &manifest, &StagedIdentity::Unavailable)
-            .expect("an unavailable identity must skip, not fail");
-        assert!(matches!(unread, PromotedIdentity::Unconfirmed));
-        let mode = fs::metadata(tmp.path().join("f.txt"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777;
-        assert_eq!(
-            mode, 0o600,
-            "an unconfirmable entry must keep the staged mode, got 0o{mode:o}",
+        let _dir = platform::mkdir_strict(&handle, OsStr::new("d")).unwrap();
+        let mut file_manifest = single_file_manifest("f.txt", b"");
+        file_manifest.root_mode = 0o666;
+        file_manifest.entries[0].mode = 0o666;
+        let dir_manifest = Manifest {
+            entries: vec![make_entry("d", ArchiveEntryKind::Directory, 0, 0o777)],
+            total_file_bytes: 0,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o777,
+        };
+        let mode_of = |name: &str| {
+            fs::metadata(tmp.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        let staged_dir_mode = mode_of("d");
+        assert_ne!(
+            staged_dir_mode, dir_manifest.root_mode,
+            "the modes must differ"
         );
 
-        let no_handle = apply_root_file_mode(&handle, &manifest, &StagedIdentity::NoHandle)
-            .expect("the ordinary no-identity state must apply the mode");
-        assert!(matches!(no_handle, PromotedIdentity::Unconfirmed));
-        let mode = fs::metadata(tmp.path().join("f.txt"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777;
-        assert_eq!(mode, 0o666, "NoHandle must apply the mode, got 0o{mode:o}");
+        for staged in [StagedIdentity::Unavailable, StagedIdentity::NoHandle] {
+            let file = apply_root_file_mode(&handle, &file_manifest, &staged)
+                .expect("a missing identity must skip, not fail");
+            assert!(matches!(file, PromotedIdentity::Unconfirmed));
+            assert_eq!(
+                mode_of("f.txt"),
+                0o600,
+                "the file must keep the staged mode"
+            );
+
+            let dir = apply_root_directory_mode(&handle, &dir_manifest, &staged)
+                .expect("a missing identity must skip, not fail");
+            assert!(matches!(dir, PromotedIdentity::Unconfirmed));
+            assert_eq!(
+                mode_of("d"),
+                staged_dir_mode,
+                "the directory must keep the staged mode"
+            );
+        }
     }
 
     /// A matching staged identity returns the confirmation the

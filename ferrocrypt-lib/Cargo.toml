@@ -51,7 +51,9 @@ tempfile = "3"
 # every open is anchored to an already-open directory handle and
 # refuses symlinks, so extraction cannot escape the output folder.
 # cap-fs-ext adds the no-follow opens that cap-std itself lacks.
-cap-std = "4"
+# 4.0.3 is the first release that refuses a symlink reached through a
+# trailing slash (RUSTSEC-2026-0482).
+cap-std = "4.0.3"
 cap-fs-ext = "4"
 # Detects two archive paths that are the same visible name written in
 # two Unicode spellings. macOS treats such names as one name, so the

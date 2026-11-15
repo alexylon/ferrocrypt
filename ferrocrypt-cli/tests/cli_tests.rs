@@ -52,19 +52,10 @@ const TEST_WORKSPACE: &str = "tests/cli_workspace";
 const INTERNAL_TEST_FAST_KDF_ENV: &str = "FERROCRYPT_INTERNAL_TEST_FAST_KDF";
 const INTERNAL_TEST_FAST_KDF_VALUE: &str = "1";
 
+/// The cli binary Cargo built for this test run. Cargo decides where it
+/// lies, so the path is never derived from the test executable's own.
 fn get_binary_path() -> PathBuf {
-    let mut path = std::env::current_exe().expect("Failed to get current exe path");
-
-    path.pop();
-    path.pop();
-
-    path.push("ferrocrypt");
-
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_ferrocrypt"))
 }
 
 /// Builds a `Command` for the cli binary with the in-tree test-only

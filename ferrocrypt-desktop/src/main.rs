@@ -56,12 +56,34 @@ fn has_selected_public_key(selected: &SelectedPublicKey) -> bool {
 /// Drops the retained recipient key together with the fingerprint describing
 /// it.
 ///
-/// The two always move together. A key retained while no fingerprint is on
-/// screen could be encrypted to without the user seeing which key it is, so
-/// every path that clears one clears the other through this function.
+/// The two always move together, and only recipient encryption uses the key,
+/// in the one mode that shows the fingerprint. A key retained without its
+/// fingerprint could be encrypted to without the user seeing which key it
+/// is, so every path that clears one clears the other through this function.
 fn forget_selected_key(app: &AppWindow, selected: &SelectedPublicKey) {
     store_selected_public_key(selected, None);
-    app.set_key_fingerprint(Default::default());
+    show_fingerprint(app, "");
+}
+
+/// A zero-width space: invisible, but a place where a line may break.
+const LINE_BREAK_OPPORTUNITY: char = '\u{200b}';
+
+/// Shows `fingerprint` in the fingerprint field; an empty one hides the field.
+///
+/// The field shows it with a line break opportunity halfway through. Digits
+/// differ in width, so a fingerprint made mostly of wide ones does not fit on
+/// one line; it then shows as two equal halves rather than losing its end,
+/// which the user needs to compare it.
+fn show_fingerprint(app: &AppWindow, fingerprint: &str) {
+    // A fingerprint is ASCII hex, so its middle byte is a character boundary.
+    let display = match fingerprint.split_at_checked(fingerprint.len() / 2) {
+        Some((first, second)) if !first.is_empty() => {
+            format!("{first}{LINE_BREAK_OPPORTUNITY}{second}")
+        }
+        _ => fingerprint.to_string(),
+    };
+    app.set_key_fingerprint(fingerprint.into());
+    app.set_key_fingerprint_display(display.into());
 }
 
 /// Width budget for a path shown in a form field (narrower: a picker button shares the row).
@@ -352,13 +374,7 @@ fn main() {
                 app.set_password_strength(password_scorer::PW_EMPTY);
                 app.set_status_ok(Default::default());
                 app.set_status_err(Default::default());
-                let keypath = app.get_key_path().to_string();
-                if !keypath.is_empty() {
-                    validate_selected_key(&app, &keypath, &selected_public_key);
-                } else {
-                    forget_selected_key(&app, &selected_public_key);
-                    app.set_key_invalid(false);
-                }
+                show_key_for_mode(&app, &selected_public_key);
                 check_conflicts(&app);
             }
         }
@@ -398,16 +414,14 @@ fn main() {
         move || {
             let Some(app) = weak.upgrade() else { return };
             let selected_public_key = selected_public_key.clone();
+            // The dialog may close after the mode has changed, when its
+            // answer no longer applies.
+            let mode = app.get_mode();
             open_dialog(
                 &app,
                 |dialog| dialog.add_filter("Key files", &["key"]).pick_file(),
                 move |app, path| {
-                    let key_path = path_to_string(&path);
-                    app.set_key_path_display(elide_path(&key_path, ELIDE).into());
-                    app.set_key_path(key_path.clone().into());
-                    validate_selected_key(app, &key_path, &selected_public_key);
-                    clear_stale_status(app);
-                    check_conflicts(app);
+                    apply_key_path(app, path, mode, &selected_public_key);
                 },
             );
         }
@@ -601,20 +615,16 @@ fn main() {
                                     app.set_conflict_warning(Default::default());
                                     app.set_status_err(Default::default());
                                     app.set_mode(MODE_RECIPIENT_ENCRYPT);
-                                    app.set_key_path_display(elide_path(&pub_key, ELIDE).into());
-                                    app.set_key_path(pub_key.clone().into());
-                                    validate_selected_key(&app, &pub_key, &selected_public_key);
+                                    // A private key chosen before belongs to
+                                    // another pair, so the user chooses again.
+                                    choose_public_key(&app, &pub_key, &selected_public_key);
+                                    app.set_chosen_private_key_path(Default::default());
+                                    show_key_for_mode(&app, &selected_public_key);
                                     app.set_status_ok(
                                         "Key pair generated \u{2014} public key selected".into(),
                                     );
                                 } else {
-                                    // Keeping the recipient lets more files go to
-                                    // the same key.
-                                    if mode == MODE_RECIPIENT_ENCRYPT {
-                                        clear_all_but_key(&app);
-                                    } else {
-                                        clear_fields(&app, &selected_public_key);
-                                    }
+                                    clear_after_operation(&app, mode, &selected_public_key);
 
                                     let action = if is_decrypt {
                                         "Decrypted to"
@@ -765,16 +775,7 @@ fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &Select
         app.set_password_strength(password_scorer::PW_EMPTY);
     }
 
-    // The key file is checked again for the new source, except for a valid
-    // public key in an unchanged mode: that one stays as read when it was
-    // selected, so the key whose fingerprint is on screen is the one used.
-    let keypath = app.get_key_path().to_string();
-    let keeps_public_key = !mode_changed
-        && new_mode == MODE_RECIPIENT_ENCRYPT
-        && has_selected_public_key(selected_public_key);
-    if !keypath.is_empty() && !keeps_public_key {
-        validate_selected_key(app, &keypath, selected_public_key);
-    }
+    show_key_for_mode(app, selected_public_key);
 
     if is_decrypt {
         update_output_path(app, &dir);
@@ -901,22 +902,96 @@ fn compute_conflict_warning(
     String::new()
 }
 
-/// Resets the form after a finished operation or an explicit clear.
-///
-/// Clearing the retained recipient key alongside the key path and fingerprint
-/// keeps the one invariant the key selection rests on: a retained key exists
-/// only while the fingerprint describing it is on screen.
+/// Resets the whole form, keys included, as the Reset button does. The
+/// retained recipient key goes with its fingerprint.
 fn clear_fields(app: &AppWindow, selected_public_key: &SelectedPublicKey) {
     clear_all_but_key(app);
-    app.set_key_path(Default::default());
-    app.set_key_path_display(Default::default());
-    forget_selected_key(app, selected_public_key);
-    app.set_key_invalid(false);
+    choose_public_key(app, "", selected_public_key);
+    app.set_chosen_private_key_path(Default::default());
+    app.set_mode(snap_back_mode(app.get_mode()));
+    show_key_for_mode(app, selected_public_key);
+}
 
-    let current = app.get_mode();
-    let snapped = snap_back_mode(current);
-    if snapped != current {
-        app.set_mode(snapped);
+/// Takes `path`, chosen in the key field while the form was in `mode`, as
+/// the key for that mode's direction, unless the form has left that mode.
+fn apply_key_path(
+    app: &AppWindow,
+    path: PathBuf,
+    mode: i32,
+    selected_public_key: &SelectedPublicKey,
+) {
+    // A dialog left open while the form moved on answers a question the
+    // form no longer asks.
+    if app.get_mode() != mode {
+        return;
+    }
+    let path = path_to_string(&path);
+    match mode {
+        MODE_RECIPIENT_ENCRYPT => choose_public_key(app, &path, selected_public_key),
+        MODE_RECIPIENT_DECRYPT => app.set_chosen_private_key_path(path.into()),
+        _ => return,
+    }
+    show_key_for_mode(app, selected_public_key);
+    clear_stale_status(app);
+    check_conflicts(app);
+}
+
+/// Makes `path` the public key chosen for encrypting to a recipient, or
+/// clears the choice when it is empty. The key read for the previous choice
+/// is dropped with it, so the next showing reads the new one.
+fn choose_public_key(app: &AppWindow, path: &str, selected_public_key: &SelectedPublicKey) {
+    forget_selected_key(app, selected_public_key);
+    app.set_chosen_public_key_path(path.into());
+}
+
+/// Shows in the key field the key chosen for the current mode's direction:
+/// the public key while encrypting to a recipient, the private key while
+/// decrypting. Each direction keeps its own, so a switch between them shows
+/// neither the other's key nor an error about it, and a switch back brings
+/// the first key back. Other modes show none.
+///
+/// A public key already read stays as read, so a key file replaced since
+/// cannot change the recipient; one not read yet, or one that failed, is
+/// read here. A private key is checked again each time, so damage since it
+/// was chosen is reported before a password is typed.
+fn show_key_for_mode(app: &AppWindow, selected_public_key: &SelectedPublicKey) {
+    let mode = app.get_mode();
+    let path = match mode {
+        MODE_RECIPIENT_ENCRYPT => app.get_chosen_public_key_path(),
+        MODE_RECIPIENT_DECRYPT => app.get_chosen_private_key_path(),
+        _ => Default::default(),
+    };
+    app.set_key_path_display(elide_path(&path, ELIDE).into());
+    app.set_key_path(path.clone());
+    let already_read =
+        mode == MODE_RECIPIENT_ENCRYPT && has_selected_public_key(selected_public_key);
+    if path.is_empty() || already_read {
+        app.set_key_invalid(false);
+    } else {
+        validate_selected_key(app, &path, selected_public_key);
+    }
+}
+
+/// Resets the form after a finished operation in `mode`. The key chosen for
+/// encrypting to a recipient stays, so more files can go to it; after a
+/// public-key encryption it stays as read, with its fingerprint. A finished
+/// decryption also clears the private key it used.
+fn clear_after_operation(app: &AppWindow, mode: i32, selected_public_key: &SelectedPublicKey) {
+    clear_all_but_key(app);
+    if mode == MODE_RECIPIENT_ENCRYPT {
+        return;
+    }
+    if mode == MODE_RECIPIENT_DECRYPT {
+        app.set_chosen_private_key_path(Default::default());
+    }
+    app.set_mode(snap_back_mode(mode));
+    show_key_for_mode(app, selected_public_key);
+    // The result the caller shows next comes first: a recipient key that
+    // cannot be read is forgotten without an error.
+    if app.get_key_invalid() {
+        choose_public_key(app, "", selected_public_key);
+        show_key_for_mode(app, selected_public_key);
+        app.set_status_err(Default::default());
     }
 }
 
@@ -958,23 +1033,46 @@ fn parent_dir(path: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// A space at which a line never breaks.
+const NO_BREAK_SPACE: &str = "\u{a0}";
+
+/// The word that starts the duration in a result message.
+const DURATION_WORD: &str = "in";
+
+/// What separates the path from the duration in a result message.
+fn duration_lead() -> String {
+    format!(" {DURATION_WORD}{NO_BREAK_SPACE}")
+}
+
+const CENTISECONDS_PER_SECOND: u64 = 100;
+const CENTISECONDS_PER_MINUTE: u64 = 60 * CENTISECONDS_PER_SECOND;
+
+/// The result message of an operation that wrote `path` in `seconds`. Its
+/// duration, such as "in 1.23 sec", is held together, so a message too long
+/// for one line moves it whole to the next.
 fn format_duration(action: &str, path: &Path, seconds: f64) -> String {
-    if seconds < 60.0 {
-        format!(
-            "{} {} in {:.2} sec",
-            action,
-            escape_path_for_display(path),
-            seconds
-        )
+    // Rounded once, so 59.996 seconds reads "1 min, 0.00 sec", never "60.00 sec".
+    let centiseconds = (seconds * CENTISECONDS_PER_SECOND as f64).round() as u64;
+    let (minutes, rest) = (
+        centiseconds / CENTISECONDS_PER_MINUTE,
+        centiseconds % CENTISECONDS_PER_MINUTE,
+    );
+    let secs = format!(
+        "{}.{:02} sec",
+        rest / CENTISECONDS_PER_SECOND,
+        rest % CENTISECONDS_PER_SECOND
+    );
+    let took = if minutes == 0 {
+        secs
     } else {
-        format!(
-            "{} {} in {} min, {:.2} sec",
-            action,
-            escape_path_for_display(path),
-            seconds as u32 / 60,
-            seconds % 60.0
-        )
-    }
+        format!("{minutes} min, {secs}")
+    };
+    format!(
+        "{action} {}{}{}",
+        escape_path_for_display(path),
+        duration_lead(),
+        took.replace(' ', NO_BREAK_SPACE)
+    )
 }
 
 /// Left-elides text to at most `max` chars, keeping the right edge visible.
@@ -1019,8 +1117,9 @@ fn elide_result_path(msg: &str) -> String {
     let msg = msg.trim();
     for prefix in ["Encrypted to ", "Decrypted to "] {
         if let Some(rest) = msg.strip_prefix(prefix) {
-            if let Some((path, duration)) = rest.rsplit_once(" in ") {
-                let suffix = format!(" in {duration}");
+            let lead = duration_lead();
+            if let Some((path, duration)) = rest.rsplit_once(lead.as_str()) {
+                let suffix = format!("{lead}{duration}");
                 return elide_path_message(prefix, path, &suffix);
             }
         }
@@ -1070,10 +1169,11 @@ fn elide_end(msg: &str, max: usize) -> String {
 
 /// Validates the selected key file for the current mode and updates the UI.
 ///
-/// In recipient-encrypt mode the key is read once here and retained in
+/// In recipient-encrypt mode the key is read here and retained in
 /// `selected`, so the fingerprint shown to the user and the key the next
-/// encryption uses are the same bytes. Every other outcome clears the
-/// retained key, so a stale one can never be reused.
+/// encryption uses are the same bytes; a key that fails clears the retained
+/// one. Other modes leave the retained key, which belongs to recipient
+/// encryption, as it is.
 fn validate_selected_key(app: &AppWindow, key_path: &str, selected: &SelectedPublicKey) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
@@ -1083,7 +1183,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str, selected: &SelectedPub
             match loaded {
                 Ok((key, fp)) => {
                     store_selected_public_key(selected, Some(key));
-                    app.set_key_fingerprint(fp.into());
+                    show_fingerprint(app, &fp);
                     app.set_key_invalid(false);
                     app.set_status_err(Default::default());
                 }
@@ -1095,7 +1195,6 @@ fn validate_selected_key(app: &AppWindow, key_path: &str, selected: &SelectedPub
             }
         }
         MODE_RECIPIENT_DECRYPT => {
-            forget_selected_key(app, selected);
             if let Err(e) = validate_private_key_file(key_path) {
                 app.set_key_invalid(true);
                 app.set_status_err(elide_error_for_status(&e.to_string()).into());
@@ -1104,10 +1203,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str, selected: &SelectedPub
                 app.set_status_err(Default::default());
             }
         }
-        _ => {
-            forget_selected_key(app, selected);
-            app.set_key_invalid(false);
-        }
+        _ => app.set_key_invalid(false),
     }
 }
 
@@ -1882,10 +1978,10 @@ mod tests {
     #[test]
     fn elide_result_path_shortens_encrypted_to_message() {
         let long = "a".repeat(200);
-        let msg = format!("Encrypted to /tmp/{long} in 1.23 sec");
+        let msg = format_duration("Encrypted to", Path::new(&format!("/tmp/{long}")), 1.234);
         let out = elide_result_path(&msg);
         assert!(out.starts_with("Encrypted to "));
-        assert!(out.ends_with(" in 1.23 sec"));
+        assert!(out.ends_with(&took("1.23 sec")));
         assert!(out.contains('\u{2026}'));
         assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
     }
@@ -1912,10 +2008,10 @@ mod tests {
     #[test]
     fn elide_result_path_shortens_decrypted_to_message() {
         let long = "b".repeat(200);
-        let msg = format!("Decrypted to /tmp/{long} in 0.50 sec");
+        let msg = format_duration("Decrypted to", Path::new(&format!("/tmp/{long} in")), 0.5);
         let out = elide_result_path(&msg);
         assert!(out.starts_with("Decrypted to "));
-        assert!(out.ends_with(" in 0.50 sec"));
+        assert!(out.ends_with(&took("0.50 sec")));
         assert!(out.contains('\u{2026}'));
         assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
     }
@@ -1982,27 +2078,43 @@ mod tests {
         assert!(out.starts_with("Output already exists: /tmp/"));
     }
 
-    #[test]
-    fn format_duration_under_one_minute() {
-        let out = format_duration("Encrypted to", Path::new("/tmp/out"), 1.234);
-        assert_eq!(out, "Encrypted to /tmp/out in 1.23 sec");
+    /// The duration of a result message as `format_duration` writes it,
+    /// from `text` written with ordinary spaces.
+    fn took(text: &str) -> String {
+        format!("{}{}", duration_lead(), text.replace(' ', NO_BREAK_SPACE))
     }
 
     #[test]
-    fn format_duration_at_and_past_one_minute() {
-        // Exact 60s must cross into the min/sec branch.
-        let out = format_duration("Decrypted to", Path::new("/tmp/out"), 60.0);
-        assert!(out.contains("1 min"));
+    fn format_duration_under_one_minute() {
+        let out = format_duration("Encrypted to", Path::new("/tmp/out"), 1.234);
+        assert_eq!(out, format!("Encrypted to /tmp/out{}", took("1.23 sec")));
+        // The bytes themselves, so the helper above cannot hide a change.
+        assert_eq!(out, "Encrypted to /tmp/out in\u{a0}1.23\u{a0}sec");
+    }
 
-        let out = format_duration("Encrypted to", Path::new("/tmp/out"), 125.5);
-        assert!(out.contains("2 min"));
-        assert!(out.contains("5.50 sec"));
+    /// A minute starts where the shown seconds would reach 60, not where the
+    /// exact ones do, so a duration never reads "60.00 sec".
+    #[test]
+    fn format_duration_at_and_past_one_minute() {
+        for (seconds, expected) in [
+            (59.994, "59.99 sec"),
+            (59.996, "1 min, 0.00 sec"),
+            (60.0, "1 min, 0.00 sec"),
+            (119.996, "2 min, 0.00 sec"),
+            (125.5, "2 min, 5.50 sec"),
+        ] {
+            let out = format_duration("Encrypted to", Path::new("/tmp/out"), seconds);
+            assert!(out.ends_with(&took(expected)), "{seconds}: got {out}");
+        }
     }
 
     #[test]
     fn shown_paths_escape_control_and_direction_characters() {
         let out = format_duration("Decrypted to", Path::new("/tmp/re\u{200f}port"), 1.0);
-        assert_eq!(out, "Decrypted to /tmp/re\\u{200f}port in 1.00 sec");
+        assert_eq!(
+            out,
+            format!("Decrypted to /tmp/re\\u{{200f}}port{}", took("1.00 sec"))
+        );
 
         assert_eq!(elide_path("/tmp/a\u{1b}b", ELIDE), "/tmp/a\\u{1b}b");
 
@@ -2266,7 +2378,7 @@ mod tests {
 
         let app = headless_app();
         app.show().unwrap();
-        app.set_key_fingerprint("0123456789abcdef".into());
+        show_fingerprint(&app, "0123456789abcdef");
 
         // A few controls each mode must have, among the others it has.
         let forms: [(i32, &[(AccessibleRole, &str)]); 5] = [
@@ -2458,9 +2570,10 @@ mod tests {
     /// above the notification bar. Each form is also checked with an error
     /// long enough to wrap, which makes the bar ask for more room: the bar
     /// takes only room the form leaves free, so no field moves. Create key
-    /// pair once pushed the buttons half out of the window on Linux, whose
-    /// fonts set taller lines than macOS. Both window frames are checked: the
-    /// system's, and the app's own with its title bar.
+    /// pair once pushed the buttons half out of the window, in a system font
+    /// with taller lines; the app now brings its own font, which these checks
+    /// measure. Both window frames are checked: the system's, and the app's
+    /// own with its title bar.
     #[test]
     #[cfg_attr(
         not(debug_assertions),
@@ -2469,6 +2582,9 @@ mod tests {
     fn every_form_fits_the_window() {
         const FINGERPRINT: &str =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // Made of the widest hex digit, so it takes two lines.
+        const WIDEST_FINGERPRINT: &str =
+            "4444444444444444444444444444444444444444444444444444444444444444";
         // The last field of each form is one of these, depending on the mode.
         const FIELDS: [&str; 6] = [
             "AppWindow::out-ta",
@@ -2479,11 +2595,12 @@ mod tests {
             "AppWindow::rpwd-ti",
         ];
         // Only public-key encryption shows a fingerprint.
-        const FORMS: [(i32, &str); 6] = [
+        const FORMS: [(i32, &str); 7] = [
             (MODE_PASSPHRASE_ENCRYPT, ""),
             (MODE_PASSPHRASE_DECRYPT, ""),
             (MODE_RECIPIENT_ENCRYPT, ""),
             (MODE_RECIPIENT_ENCRYPT, FINGERPRINT),
+            (MODE_RECIPIENT_ENCRYPT, WIDEST_FINGERPRINT),
             (MODE_RECIPIENT_DECRYPT, ""),
             (MODE_KEYGEN, ""),
         ];
@@ -2501,18 +2618,21 @@ mod tests {
             const WORD: &str = "word ";
             let long_error = WORD.repeat(STATUS_ERROR_BUDGET / WORD.len());
             let mut button_tops = Vec::new();
+            let mut fingerprint_heights = Vec::new();
             let mut bar_grew = false;
             for (mode, fingerprint) in FORMS {
                 let mut without_error = None;
                 for error in ["", long_error.as_str()] {
                     app.set_mode(mode);
-                    app.set_key_fingerprint(fingerprint.into());
+                    show_fingerprint(&app, fingerprint);
                     app.set_status_err(error.into());
                     let case = format!(
-                        "own frame {own_frame}, mode {mode}, fingerprint {}, error {}",
-                        !fingerprint.is_empty(),
+                        "own frame {own_frame}, mode {mode}, fingerprint {fingerprint:?}, error {}",
                         !error.is_empty()
                     );
+                    if let Some(field) = element("AppWindow::fp-field") {
+                        fingerprint_heights.push((fingerprint, field.size().height));
+                    }
 
                     let button = element("AppWindow::start-ta").expect("the action button exists");
                     let button_top = button.absolute_position().y;
@@ -2545,6 +2665,19 @@ mod tests {
                     bar_grew |= bar_height > bar_height_without_error;
                 }
             }
+            // A fingerprint too wide for one line takes a second one rather than
+            // hiding its end.
+            let height_of = |wanted: &str| {
+                fingerprint_heights
+                    .iter()
+                    .find(|(fingerprint, _)| *fingerprint == wanted)
+                    .map(|(_, height)| *height)
+                    .expect("the fingerprint was shown")
+            };
+            assert!(
+                height_of(WIDEST_FINGERPRINT) > height_of(FINGERPRINT),
+                "the widest fingerprint did not take a second line"
+            );
             // Otherwise the error never asked for room, and the check above that
             // no field moves tested nothing.
             assert!(
@@ -2671,8 +2804,7 @@ mod tests {
 
         let app = headless_app();
         app.set_mode(MODE_RECIPIENT_ENCRYPT);
-        app.set_key_path(path_to_string(&key_a).into());
-        validate_selected_key(&app, &path_to_string(&key_a), &selected);
+        apply_key_path(&app, key_a.clone(), MODE_RECIPIENT_ENCRYPT, &selected);
         let fingerprint = app.get_key_fingerprint();
         assert_ne!(fingerprint, "");
 
@@ -2685,7 +2817,7 @@ mod tests {
 
         // A key that failed is read again, so a fixed file is picked up.
         fs::write(&key_a, b"not a key").unwrap();
-        validate_selected_key(&app, &path_to_string(&key_a), &selected);
+        apply_key_path(&app, key_a.clone(), MODE_RECIPIENT_ENCRYPT, &selected);
         assert!(app.get_key_invalid());
         fs::copy(&key_b, &key_a).unwrap();
         apply_input_path(&app, dir.path().join("source.txt"), &selected);
@@ -2710,8 +2842,7 @@ mod tests {
         .expect("recipient encrypt");
         let private_key = dir.path().join("b").join(PRIVATE_KEY_FILENAME);
         app.set_mode(MODE_RECIPIENT_DECRYPT);
-        app.set_key_path(path_to_string(&private_key).into());
-        validate_selected_key(&app, &path_to_string(&private_key), &selected);
+        apply_key_path(&app, private_key.clone(), MODE_RECIPIENT_DECRYPT, &selected);
         assert!(!app.get_key_invalid());
 
         fs::write(&private_key, b"damaged").unwrap();
@@ -2721,6 +2852,229 @@ mod tests {
             app.get_key_invalid(),
             "the damaged private key was not reported"
         );
+    }
+
+    /// Each direction keeps its own key. A source that switches between
+    /// encrypting and decrypting shows the key chosen for the new direction,
+    /// with no error about the other one, such as the public key of the
+    /// encryption just made when its file is picked to decrypt; a switch back
+    /// brings the first key back. A key of the wrong kind chosen in the key
+    /// field itself, and a damaged key, are still reported. A public key stays
+    /// as read across the switches, whatever happens to its file. A finished
+    /// decryption clears its private key and keeps the recipient key.
+    #[test]
+    fn each_direction_keeps_its_own_key() {
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let public_key = generate_test_key_pair(&dir.path().join("keys"));
+        let private_key = dir.path().join("keys").join(PRIVATE_KEY_FILENAME);
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"plain text").unwrap();
+        let sealed = run_operation(
+            Operation {
+                mode: MODE_RECIPIENT_ENCRYPT,
+                input: &source,
+                output_dir: dir.path(),
+                save_as: None,
+                key_path: Path::new(""),
+                public_key: Some(PublicKey::from_key_file(&public_key).unwrap()),
+                kdf_params: None,
+            },
+            Passphrase::new("unused"),
+            &|_: &ProgressEvent| {},
+        )
+        .expect("recipient encrypt");
+        let selected: SelectedPublicKey = Arc::new(Mutex::new(None));
+        let app = headless_app();
+        let shows = |mode: i32, key: &str| {
+            assert_eq!(app.get_mode(), mode);
+            assert_eq!(app.get_key_path(), key);
+            assert!(!app.get_key_invalid(), "{key:?} is reported");
+            assert_eq!(app.get_status_err(), "");
+            if mode == MODE_RECIPIENT_ENCRYPT {
+                assert_eq!(app.get_key_fingerprint() != "", !key.is_empty());
+                assert_eq!(has_selected_public_key(&selected), !key.is_empty());
+            }
+        };
+        let (public_key, private_key) = (path_to_string(&public_key), path_to_string(&private_key));
+
+        app.set_mode(MODE_RECIPIENT_ENCRYPT);
+        apply_key_path(
+            &app,
+            public_key.clone().into(),
+            MODE_RECIPIENT_ENCRYPT,
+            &selected,
+        );
+        apply_input_path(&app, sealed.clone(), &selected);
+        assert_eq!(app.get_mode(), MODE_RECIPIENT_DECRYPT);
+        assert_eq!(
+            app.get_key_path(),
+            "",
+            "the public key is offered to decrypt"
+        );
+        assert!(!app.get_key_invalid());
+        assert_eq!(app.get_status_err(), "");
+
+        apply_key_path(
+            &app,
+            private_key.clone().into(),
+            MODE_RECIPIENT_DECRYPT,
+            &selected,
+        );
+        shows(MODE_RECIPIENT_DECRYPT, &private_key);
+        apply_input_path(&app, source.clone(), &selected);
+        shows(MODE_RECIPIENT_ENCRYPT, &public_key);
+        let fingerprint = app.get_key_fingerprint();
+
+        // A public key file replaced while the form decrypts does not change
+        // the recipient: the key stays as read when it was chosen.
+        let other_key = generate_test_key_pair(&dir.path().join("other"));
+        let original = fs::read(&public_key).unwrap();
+        fs::copy(&other_key, &public_key).unwrap();
+        apply_input_path(&app, sealed.clone(), &selected);
+        shows(MODE_RECIPIENT_DECRYPT, &private_key);
+        apply_input_path(&app, source.clone(), &selected);
+        shows(MODE_RECIPIENT_ENCRYPT, &public_key);
+        assert_eq!(app.get_key_fingerprint(), fingerprint);
+        let kept = take_selected_public_key(&selected).expect("the key is kept");
+        assert_eq!(kept.fingerprint().unwrap(), fingerprint.as_str());
+        fs::write(&public_key, original).unwrap();
+
+        apply_input_path(&app, sealed.clone(), &selected);
+        shows(MODE_RECIPIENT_DECRYPT, &private_key);
+
+        // A key of the wrong kind chosen in the key field is reported.
+        apply_input_path(&app, source.clone(), &selected);
+        apply_key_path(
+            &app,
+            private_key.clone().into(),
+            MODE_RECIPIENT_ENCRYPT,
+            &selected,
+        );
+        assert!(app.get_key_invalid());
+        assert_ne!(app.get_status_err(), "");
+
+        // A damaged key is reported again whenever its direction comes back.
+        let damaged = path_to_string(&dir.path().join("damaged.key"));
+        fs::write(&damaged, b"not a key").unwrap();
+        apply_key_path(
+            &app,
+            damaged.clone().into(),
+            MODE_RECIPIENT_ENCRYPT,
+            &selected,
+        );
+        assert!(app.get_key_invalid());
+        apply_input_path(&app, sealed.clone(), &selected);
+        shows(MODE_RECIPIENT_DECRYPT, &private_key);
+        apply_input_path(&app, source, &selected);
+        assert_eq!(app.get_key_path(), damaged.as_str());
+        assert!(app.get_key_invalid(), "the damaged key's error was lost");
+        assert_ne!(app.get_status_err(), "");
+
+        // A key from a dialog opened before the mode changed is dropped.
+        apply_input_path(&app, sealed.clone(), &selected);
+        apply_key_path(
+            &app,
+            public_key.clone().into(),
+            MODE_RECIPIENT_ENCRYPT,
+            &selected,
+        );
+        shows(MODE_RECIPIENT_DECRYPT, &private_key);
+        assert_eq!(app.get_chosen_public_key_path(), damaged.as_str());
+
+        // A finished decryption clears its private key and shows the
+        // recipient key again.
+        choose_public_key(&app, &public_key, &selected);
+        clear_after_operation(&app, MODE_RECIPIENT_DECRYPT, &selected);
+        shows(MODE_RECIPIENT_ENCRYPT, &public_key);
+        assert_eq!(app.get_chosen_private_key_path(), "");
+
+        // A recipient key that can no longer be read is forgotten after a
+        // decryption, so no error hides the result.
+        apply_input_path(&app, sealed, &selected);
+        choose_public_key(&app, &damaged, &selected);
+        clear_after_operation(&app, MODE_RECIPIENT_DECRYPT, &selected);
+        shows(MODE_RECIPIENT_ENCRYPT, "");
+        assert_eq!(app.get_chosen_public_key_path(), "");
+
+        // Reset forgets both.
+        clear_fields(&app, &selected);
+        assert_eq!(app.get_chosen_public_key_path(), "");
+        assert_eq!(app.get_chosen_private_key_path(), "");
+    }
+
+    /// The font that draws masked passwords is the one the UI names: with any
+    /// other name, Slint would fall back to Inter's much larger dot.
+    #[test]
+    fn the_password_mask_font_has_the_name_the_ui_uses() {
+        const PROPERTY: &str = "password-mask-font: \"";
+        let slint = include_str!("../ui/app.slint");
+        let family = slint
+            .split_once(PROPERTY)
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(family, _)| family)
+            .expect("app.slint names the password mask font");
+        let font = include_bytes!("../fonts/PasswordMask.ttf");
+        assert_eq!(font_family_name(font), family);
+    }
+
+    /// The family name a font is looked up by, as its `name` table records it
+    /// for Windows: the typographic family name if there is one, otherwise
+    /// the family name.
+    fn font_family_name(font: &[u8]) -> String {
+        const TABLE_RECORDS: usize = 12;
+        const TABLE_RECORD_SIZE: usize = 16;
+        const NAME_RECORDS: usize = 6;
+        const NAME_RECORD_SIZE: usize = 12;
+        const WINDOWS_PLATFORM: usize = 3;
+        const FAMILY_NAME: usize = 1;
+        const TYPOGRAPHIC_FAMILY_NAME: usize = 16;
+
+        let u16_at = |at: usize| usize::from(u16::from_be_bytes([font[at], font[at + 1]]));
+        let u32_at = |at: usize| u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) as usize;
+        let table = (0..u16_at(4))
+            .map(|i| TABLE_RECORDS + TABLE_RECORD_SIZE * i)
+            .find(|&record| &font[record..record + 4] == b"name")
+            .map(|record| u32_at(record + 8))
+            .expect("the font has a name table");
+        let strings = table + u16_at(table + 4);
+        let name = |id: usize| {
+            (0..u16_at(table + 2))
+                .map(|i| table + NAME_RECORDS + NAME_RECORD_SIZE * i)
+                .find(|&record| u16_at(record) == WINDOWS_PLATFORM && u16_at(record + 6) == id)
+                .map(|record| {
+                    let start = strings + u16_at(record + 10);
+                    let units: Vec<u16> = font[start..start + u16_at(record + 8)]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_be_bytes(*pair))
+                        .collect();
+                    String::from_utf16(&units).expect("a UTF-16 name")
+                })
+        };
+        name(TYPOGRAPHIC_FAMILY_NAME)
+            .or_else(|| name(FAMILY_NAME))
+            .expect("the font has a family name")
+    }
+
+    /// The fingerprint field shows the fingerprint with a line break
+    /// opportunity halfway, and nothing else; the value copied stays as it is.
+    #[test]
+    fn the_fingerprint_may_break_only_halfway() {
+        let app = headless_app();
+        let fingerprint = "0123456789abcdef".repeat(4);
+        show_fingerprint(&app, &fingerprint);
+        assert_eq!(app.get_key_fingerprint(), fingerprint.as_str());
+        let display = app.get_key_fingerprint_display();
+        let (first, second) = display
+            .split_once(LINE_BREAK_OPPORTUNITY)
+            .expect("a break opportunity");
+        assert_eq!(first.len(), fingerprint.len() / 2);
+        assert_eq!(format!("{first}{second}"), fingerprint);
+
+        show_fingerprint(&app, "");
+        assert_eq!(app.get_key_fingerprint(), "");
+        assert_eq!(app.get_key_fingerprint_display(), "");
     }
 
     /// A click on the active tab, or on the active key source, changes

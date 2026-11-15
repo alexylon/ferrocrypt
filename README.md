@@ -507,7 +507,9 @@ OpenSSL. The library forbids `unsafe` code.
 
 Licensed under [GPL-3.0-only](LICENSE).
 
-The desktop app uses [Slint](https://slint.dev/). Password strength scoring is
-adapted from [Proton Pass](https://github.com/protonpass/proton-pass-common) (GPLv3).
+The desktop app uses [Slint](https://slint.dev/) and the [Inter](https://rsms.me/inter/)
+font, licensed under the [SIL Open Font License 1.1](ferrocrypt-desktop/fonts/OFL.txt).
+Password strength scoring is adapted from
+[Proton Pass](https://github.com/protonpass/proton-pass-common) (GPLv3).
 
 [![forthebadge](https://forthebadge.com/images/badges/made-with-rust.svg)](https://forthebadge.com)

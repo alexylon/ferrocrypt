@@ -1,5 +1,14 @@
 // FerroCrypt Slint GUI — Dark Security Theme
 
+// Inter, in the three weights the UI uses, is built into the app and used on
+// every system, so the layout is the same everywhere (see ../fonts/README.md).
+import "../fonts/Inter-Regular.ttf";
+import "../fonts/Inter-SemiBold.ttf";
+import "../fonts/Inter-Bold.ttf";
+// Draws a masked password: Inter's "●" is much larger than the one the layout
+// was tuned with. Built by scripts/make_password_mask_font.py.
+import "../fonts/PasswordMask.ttf";
+
 // Mode codes shared with the Rust side (see MODE_* constants in main.rs).
 global Mode {
     out property <int> passphrase-encrypt: 0;
@@ -55,11 +64,14 @@ global Theme {
     out property <color> info-bg: #0a1420;
     out property <color> info-border: #152a3b;
 
-    // Font sizes
-    out property <length> font-title: 20px;
-    out property <length> font-action: 14px;
-    out property <length> font-body: 12.5px;
-    out property <length> font-caption: 10.5px;
+    // Font. The layout was first tuned against the macOS system font. Inter
+    // is wider, so these sizes give text the widths it had there.
+    out property <string> font-family: "Inter";
+    out property <string> password-mask-font: "FerroCrypt Password Mask";
+    out property <length> font-title: 19px;
+    out property <length> font-action: 13px;
+    out property <length> font-body: 11.5px;
+    out property <length> font-caption: 9.5px;
 
     // Font weights
     out property <int> weight-normal: 400;
@@ -107,8 +119,8 @@ global Theme {
     // Heavier than `icon-stroke`: the password match mark is read at a glance.
     out property <length> match-stroke: 2px;
     out property <length> focus-ring: 2px;
-    // Wide enough for "Strong" in the system fonts, so the meter beside it
-    // keeps its length whatever the label says.
+    // Wide enough for "Strong", so the meter beside it keeps its length
+    // whatever the label says.
     out property <length> strength-label-w: 40px;
     out property <length> window-w: 450px;
     out property <length> window-h: 700px;
@@ -117,23 +129,17 @@ global Theme {
     out property <length> title-bar-h: 35px;
     out property <length> window-radius: 12px;
     out property <length> title-icon: 8px;
-
-    // Lets the form's gaps shrink when a mode needs more height than the
-    // fixed window has. The layout was tuned against the macOS system font,
-    // so macOS keeps rigid gaps; elsewhere, fonts with taller lines need
-    // this in Create key pair mode.
-    out property <bool> flexible-gaps: Platform.os != OperatingSystemType.macos;
 }
 
 // ---------------------------------------------------------------------------
 // Reusable: space above a form section
 // ---------------------------------------------------------------------------
-// Its height is `gap`. With `Theme.flexible-gaps`, it can shrink to `least`
-// when the form needs more height than the window has.
+// Its height is `gap`. It can shrink to `least` when the form needs more
+// height than the fixed window has, as Create key pair does.
 component FieldGap inherits Rectangle {
     in property <length> gap: Theme.field-gap;
     in property <length> least: Theme.gap-md;
-    min-height: Theme.flexible-gaps ? self.least : self.gap;
+    min-height: self.least;
     preferred-height: self.gap;
     max-height: self.gap;
 }
@@ -328,6 +334,7 @@ component PasswordInput {
             y: (parent.height - self.preferred-height) / 2;
             height: self.preferred-height;
             color: Theme.text;
+            font-family: root.masked ? Theme.password-mask-font : Theme.font-family;
             font-size: Theme.font-body;
             text-cursor-width: 2px;
             selection-background-color: Theme.accent;
@@ -456,6 +463,7 @@ component TitleBar inherits Rectangle {
 // ---------------------------------------------------------------------------
 export component AppWindow inherits Window {
     title: app-version != "" ? "FerroCrypt v" + app-version : "FerroCrypt";
+    default-font-family: Theme.font-family;
     // Where the system draws no frame (GNOME on Wayland, for one), the app
     // draws its own: a title bar and rounded corners. The window is then
     // transparent outside them.
@@ -475,8 +483,13 @@ export component AppWindow inherits Window {
     in-out property <string> output-path-display;
     in-out property <string> password;
     in-out property <string> password-repeated;
+    // The key file in the key field: the one chosen for the current mode's
+    // direction. Each direction's choice is kept in its own property below
+    // while the form shows the other direction.
     in-out property <string> key-path;
     in-out property <string> key-path-display;
+    in-out property <string> chosen-public-key-path;
+    in-out property <string> chosen-private-key-path;
     in-out property <string> keygen-output-dir;
     in-out property <string> keygen-output-dir-display;
     in-out property <string> status-ok;
@@ -496,6 +509,9 @@ export component AppWindow inherits Window {
     in-out property <string> input-reason;
     in-out property <int> password-strength: 0;
     in-out property <string> key-fingerprint;
+    // `key-fingerprint` as shown: the Rust side adds a line break opportunity
+    // halfway through it.
+    in-out property <string> key-fingerprint-display;
     in-out property <bool> key-invalid: false;
 
     // ── Derived ─────────────────────────────────────────────────────────
@@ -966,8 +982,11 @@ export component AppWindow inherits Window {
                         height: Theme.label-gap;
                     }
 
+                    // One line where the fingerprint fits. One made mostly of
+                    // wide digits breaks in half and the field grows, so no
+                    // character is hidden.
                     fp-field := Rectangle {
-                        height: Theme.ctl-height;
+                        min-height: Theme.ctl-height;
                         border-radius: Theme.radius-lg;
                         background: Theme.info-bg;
                         border-width: Theme.hairline;
@@ -976,14 +995,19 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding-left: Theme.field-pad;
                             padding-right: Theme.gap-sm;
+                            padding-top: Theme.gap-sm;
+                            padding-bottom: Theme.gap-sm;
                             spacing: Theme.gap-sm;
 
                             Text {
-                                text: key-fingerprint;
+                                text: key-fingerprint-display;
+                                // Without the break opportunity, which a
+                                // screen reader may announce.
+                                accessible-label: key-fingerprint;
                                 color: Theme.text-dim;
                                 font-size: Theme.font-caption;
                                 vertical-alignment: center;
-                                overflow: elide;
+                                wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
 
@@ -1346,10 +1370,8 @@ export component AppWindow inherits Window {
 
         // ── Spacer: pushes bottom section to a fixed position ──
         Rectangle {
-            // Keeps the bar off the last field; with flexible gaps, the gaps above
-            // shrink instead. With rigid gaps, Create key pair leaves little more
-            // than this, so the bar cannot grow onto the last field.
-            min-height: Theme.flexible-gaps ? Theme.gap-lg : Theme.gap-sm;
+            // Keeps the bar off the last field; the gaps above shrink instead.
+            min-height: Theme.gap-lg;
             vertical-stretch: 1;
         }
 
@@ -1359,8 +1381,7 @@ export component AppWindow inherits Window {
         // Priority: error > warning > success/progress > "Ready". Only one shown at a time.
         // The bar grows upward into the spacer to fit a wrapped message and
         // shrinks back to one line when the mode above leaves no room. Its
-        // stretch makes the layout shrink it before the form's gaps. With
-        // rigid gaps the form cannot shrink, so the stretch changes nothing.
+        // stretch makes the layout shrink it before the form's gaps.
         Rectangle {
             property <bool> show-ready: !is-working && status-err == "" && conflict-warning == "" && status-ok == "";
             vertical-stretch: 1;

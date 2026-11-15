@@ -90,24 +90,13 @@
                 <Directory Id='APPLICATIONFOLDER' Name='ferrocrypt-desktop'>
                     
                     <!--
-                      Enabling the license sidecar file in the installer is a four step process:
-
-                      1. Uncomment the `Component` tag and its contents.
-                      2. Change the value for the `Source` attribute in the `File` tag to a path
-                         to the file that should be included as the license sidecar file. The path
-                         can, and probably should be, relative to this file.
-                      3. Change the value for the `Name` attribute in the `File` tag to the
-                         desired name for the file when it is installed alongside the `bin` folder
-                         in the installation directory. This can be omitted if the desired name is
-                         the same as the file name.
-                      4. Uncomment the `ComponentRef` tag with the Id attribute value of "License"
-                         further down in this file.
+                      The license of the Inter font the binary embeds, which
+                      must ship with each copy. The path starts from this
+                      file's folder, wherever the WiX tools run.
                     -->
-                    <!--
                     <Component Id='License' Guid='*'>
-                        <File Id='LicenseFile' Name='ChangeMe' DiskId='1' Source='C:\Path\To\File' KeyPath='yes'/>
+                        <File Id='LicenseFile' Name='Inter-OFL.txt' DiskId='1' Source='$(sys.SOURCEFILEDIR)..\fonts\OFL.txt' KeyPath='yes'/>
                     </Component>
-                    -->
 
                     <Directory Id='Bin' Name='bin'>
                         <Component Id='Path' Guid='D34FF2E3-B49E-4EDB-9302-59D30B824B53' KeyPath='yes'>
@@ -143,11 +132,7 @@
             Display='expand'
             Absent='disallow'>
             
-            <!--
-              Uncomment the following `ComponentRef` tag to add the license
-              sidecar file to the installer.
-            -->
-            <!--<ComponentRef Id='License'/>-->
+            <ComponentRef Id='License'/>
 
             <ComponentRef Id='binary0'/>
 

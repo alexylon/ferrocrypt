@@ -61,8 +61,7 @@ opt-level = 3
 
 # cargo-wix is used for the Windows MSI build (cargo-bundle's MSI support is
 # still experimental). Suppress the EULA dialog (license-screen) for the
-# installer; the GPL-3.0 text is shipped with the binary, not as an installer
-# screen.
+# installer: the GPL-3.0 asks for no acceptance before use.
 [package.metadata.wix]
 eula = false
 
@@ -70,7 +69,8 @@ eula = false
 name = "FerroCrypt"
 identifier = "app.ferrocrypt"
 icon = ["assets/app_icon.png"]
-resources = ["assets"]
+# The binary embeds the Inter font, whose license must ship with each copy.
+resources = ["assets", "fonts/OFL.txt"]
 category = "Developer Tool"
 short_description = "FerroCrypt desktop app"
 

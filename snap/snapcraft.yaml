@@ -69,3 +69,8 @@ parts:
     override-pull: |
       craftctl default
       craftctl set version="$(grep -m1 '^version' ferrocrypt-desktop/Cargo.toml | cut -d '"' -f2)"
+    # The binary embeds the Inter font, whose license must ship with each copy.
+    override-build: |
+      craftctl default
+      install -D -m 644 ferrocrypt-desktop/fonts/OFL.txt \
+        "$CRAFT_PART_INSTALL/usr/share/doc/ferrocrypt/Inter-OFL.txt"

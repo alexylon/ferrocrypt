@@ -647,7 +647,10 @@ fn main() {
             let fp = app.get_key_fingerprint().to_string();
             if !fp.is_empty() {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(fp);
+                    // Said in the status bar too, so a screen reader reads it.
+                    if clipboard.set_text(fp).is_ok() {
+                        app.set_status_ok("Fingerprint copied".into());
+                    }
                 }
             }
         }
@@ -2035,10 +2038,7 @@ mod tests {
                 w.dispatch_event(WindowEvent::PointerReleased { position, button });
             }
         };
-        let tap = |key: slint::SharedString| {
-            w.dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
-            w.dispatch_event(WindowEvent::KeyReleased { text: key });
-        };
+        let tap = |key: slint::SharedString| tap_key(&app, key);
         // Slint reports Cmd on macOS as Ctrl, so this covers both.
         let shortcuts = |keys: &[&str]| {
             let control: slint::SharedString = Key::Control.into();
@@ -2104,8 +2104,9 @@ mod tests {
         assert_eq!(app.get_password_repeated(), PASSPHRASE);
 
         // Tab must reach the next field: the wrapper around each input never
-        // takes focus.
+        // takes focus. The button that shows the password comes between.
         let password = app.get_password();
+        tap(Key::Tab.into());
         tap(Key::Tab.into());
         tap("?".into());
         assert!(
@@ -2113,6 +2114,192 @@ mod tests {
             "Tab did not reach the confirmation"
         );
         assert_eq!(app.get_password(), password);
+    }
+
+    /// The keyboard reaches the buttons past the last field and presses them:
+    /// Tab moves from the confirmation to Reset, then to the action button,
+    /// Space or Enter presses the one that has the focus, and a single ring
+    /// shows where the focus is.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn the_keyboard_reaches_and_presses_the_buttons() {
+        let app = headless_app();
+        let presses = Rc::new(RefCell::new(Vec::new()));
+        let record = |name: &'static str| {
+            let presses = presses.clone();
+            move || presses.borrow_mut().push(name)
+        };
+        app.on_clear_form(record("reset"));
+        app.on_start_operation(record("start"));
+        app.show().unwrap();
+
+        // A form ready to encrypt, so both buttons can be pressed.
+        app.set_input_path("source.txt".into());
+        app.set_password("pw".into());
+        app.set_password_repeated("pw".into());
+
+        let tap = |key: slint::SharedString| tap_key(&app, key);
+        click(&app, "AppWindow::rpwd-ti", PointerEventButton::Left);
+        tap(Key::Tab.into());
+        tap(Key::Space.into());
+        tap(Key::Tab.into());
+        tap(Key::Return.into());
+
+        assert_eq!(*presses.borrow(), ["reset", "start"]);
+
+        // One ring shows the focus, across the control that has it. It stays
+        // while that control is turned off, and none is left behind once the
+        // focus moves on.
+        let rings =
+            || ElementHandle::find_by_element_id(&app, "Pressable::focus-ring").collect::<Vec<_>>();
+        let start = ElementHandle::find_by_element_id(&app, "AppWindow::start-ta")
+            .next()
+            .expect("the action button exists");
+        let on_start = |ring: &ElementHandle| {
+            ring.absolute_position() == start.absolute_position() && ring.size() == start.size()
+        };
+        let ring = rings();
+        assert_eq!(ring.len(), 1, "one ring");
+        assert!(on_start(&ring[0]), "the ring does not cover the button");
+
+        app.set_password_repeated("other".into());
+        let ring = rings();
+        assert!(
+            ring.len() == 1 && on_start(&ring[0]),
+            "the focus is out of sight"
+        );
+
+        tap(Key::Tab.into());
+        app.set_password_repeated("pw".into());
+        let ring = rings();
+        assert!(
+            ring.len() == 1 && !on_start(&ring[0]),
+            "a ring was left behind"
+        );
+    }
+
+    /// Every button, tab, tab list, and text input tells assistive technology
+    /// what it is called, and a tab's default action does what a click does:
+    /// it switches the form, unless it is already the active one. The status
+    /// is read out as it changes.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "needs Slint debug info, which is compiled in only when debug assertions are on"
+    )]
+    fn every_control_is_named_for_assistive_technology() {
+        use i_slint_backend_testing::{AccessibleLiveness, AccessibleRole};
+
+        let app = headless_app();
+        app.show().unwrap();
+        app.set_key_fingerprint("0123456789abcdef".into());
+
+        // A few controls each mode must have, among the others it has.
+        let forms: [(i32, &[(AccessibleRole, &str)]); 5] = [
+            (
+                MODE_PASSPHRASE_ENCRYPT,
+                &[
+                    (AccessibleRole::TextInput, "Confirm password"),
+                    (AccessibleRole::Button, "Show password"),
+                ],
+            ),
+            (
+                MODE_PASSPHRASE_DECRYPT,
+                &[(AccessibleRole::Button, "Choose output location")],
+            ),
+            (
+                MODE_RECIPIENT_ENCRYPT,
+                &[
+                    (AccessibleRole::Button, "Copy fingerprint"),
+                    (AccessibleRole::Button, "Choose public key"),
+                ],
+            ),
+            (
+                MODE_RECIPIENT_DECRYPT,
+                &[
+                    (AccessibleRole::TextInput, "Private key password"),
+                    (AccessibleRole::Button, "Show private key password"),
+                ],
+            ),
+            (
+                MODE_KEYGEN,
+                &[
+                    (AccessibleRole::Button, "Choose key pair folder"),
+                    (AccessibleRole::Tab, "Create key pair"),
+                ],
+            ),
+        ];
+
+        for (mode, expected) in forms {
+            app.set_mode(mode);
+            let mut controls = Vec::new();
+
+            for role in [
+                AccessibleRole::Button,
+                AccessibleRole::Tab,
+                AccessibleRole::TabList,
+                AccessibleRole::TextInput,
+            ] {
+                controls.extend(
+                    app.root_element()
+                        .query_descendants()
+                        .match_accessible_role(role)
+                        .find_all(),
+                );
+            }
+
+            let named: Vec<_> = controls
+                .iter()
+                .map(|control| {
+                    let label = control.accessible_label().unwrap_or_default();
+                    assert!(
+                        !label.is_empty(),
+                        "mode {mode}: a {:?} has no name",
+                        control.accessible_role()
+                    );
+                    (control.accessible_role(), label.to_string())
+                })
+                .collect();
+
+            for (role, label) in expected {
+                assert!(
+                    named.contains(&(Some(*role), label.to_string())),
+                    "mode {mode}: no {role:?} named {label}"
+                );
+            }
+        }
+
+        let element = |id: &str| {
+            ElementHandle::find_by_element_id(&app, id)
+                .next()
+                .unwrap_or_else(|| panic!("no element {id}"))
+        };
+        app.set_mode(MODE_PASSPHRASE_DECRYPT);
+        element("AppWindow::password-tab").invoke_accessible_default_action();
+        assert_eq!(app.get_mode(), MODE_PASSPHRASE_DECRYPT);
+        assert_eq!(
+            element("AppWindow::password-tab").accessible_item_selected(),
+            Some(true)
+        );
+
+        app.set_mode(MODE_PASSPHRASE_ENCRYPT);
+        element("AppWindow::key-pair-tab").invoke_accessible_default_action();
+        assert_eq!(app.get_mode(), MODE_RECIPIENT_ENCRYPT);
+
+        // The status is read out as it changes.
+        let status = element("AppWindow::notify-text");
+        assert_eq!(
+            status.accessible_live_region(),
+            Some(AccessibleLiveness::Polite)
+        );
+        app.set_status_err("Something failed".into());
+        assert_eq!(
+            status.accessible_label().as_deref(),
+            Some("Something failed")
+        );
     }
 
     /// A headless platform for layout checks.
@@ -2467,6 +2654,14 @@ mod tests {
             .unwrap_or_else(|| panic!("no element {id}"));
         let (origin, size) = (element.absolute_position(), element.size());
         slint::LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0)
+    }
+
+    /// Presses `key` and releases it.
+    fn tap_key(app: &AppWindow, key: slint::SharedString) {
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key });
     }
 
     /// Presses `id`'s centre with `button` and releases it there.

@@ -18,8 +18,10 @@ cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings
 # Desktop app an agent can see and drive (debug build, `mcp` feature): Slint's
 # MCP server on port 7992, file dialogs answered by `pick`. Run the script
 # without arguments for its commands (pick, shot, tree, status, click, type, call).
+# `click` takes a control's accessible name, as `tree` lists it. Off macOS the
+# source has two buttons instead, "Choose source file" and "Choose source folder".
 scripts/desktop_mcp.py run               # add --headless for no window on screen
-scripts/desktop_mcp.py pick ~/note.txt && scripts/desktop_mcp.py click Choose 1
+scripts/desktop_mcp.py pick ~/note.txt && scripts/desktop_mcp.py click "Choose source file or folder"
 
 # Run specific tests
 cargo test test_name -- --test-threads=1     # single test by name

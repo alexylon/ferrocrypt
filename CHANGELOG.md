@@ -7,6 +7,7 @@ All notable changes to FerroCrypt are documented in this file.
 ### Added
 - **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
 - **`escape_path_for_display` renders a path for showing to a person.** It escapes control characters, text-direction characters, the line and paragraph separators, and invisible characters such as the zero-width space, and keeps every other character, so an application built on the library can show paths the way the CLI and desktop app do.
+- **The desktop app can now be used with the keyboard and with a screen reader.** Tab moves through the form's buttons, tabs, and fields, Space or Enter presses the focused one, and a ring shows the focus; before, its buttons could only be pressed with a mouse. Controls give a screen reader their names and states, and status messages are read out as they appear.
 
 ### Changed
 - **After a public-key encryption, the desktop app keeps the public key selected, so more files can go to the same recipient.** Its fingerprint stays on screen, and Reset clears both.

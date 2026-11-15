@@ -104,6 +104,7 @@ global Theme {
     out property <length> icon-btn: 22px;
     out property <length> icon: 11px;
     out property <length> icon-stroke: 1.5px;
+    out property <length> focus-ring: 2px;
     // Wide enough for "Strong" in the system fonts, so the meter beside it
     // keeps its length whatever the label says.
     out property <length> strength-label-w: 40px;
@@ -136,27 +137,101 @@ component FieldGap inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
-// Reusable: small outline button
+// Reusable: a control the mouse, the keyboard, and assistive technology press
 // ---------------------------------------------------------------------------
-component SmallButton inherits Rectangle {
-    in property <string> label;
+// A click presses it, so do Space and Enter once Tab has moved the focus to
+// it, and so does assistive technology's default action; each calls `pressed`
+// while the control is enabled. Set `accessible-label` to the control's name.
+// The focus is taken by a scope that takes no clicks, so a click does not
+// move it and the ring that shows it, `ring-inset` inside the control's edge,
+// appears only for keyboard use. Assistive technology announces the focus as
+// this control, the nearest accessible element around it.
+component Pressable inherits Rectangle {
     in property <bool> enabled: true;
-    callback clicked();
+    in property <length> ring-inset: 0;
+    in property <color> ring-color: Theme.border-focus;
+    // Whether Tab stops here.
+    in property <bool> tab-stop: true;
+    in property <MouseCursor> cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+    // A turned-off control ignores the pointer, so its last hover would
+    // otherwise stay.
+    out property <bool> has-hover: ta.has-hover && root.enabled;
+    callback pressed();
 
-    height: Theme.field-height;
-    border-radius: Theme.radius-lg;
-    background: !root.enabled ? Theme.surface : ta.has-hover ? Theme.surface-hover : Theme.surface;
-    border-width: Theme.hairline;
-    border-color: Theme.border;
-    animate background { duration: Theme.dur-fast; }
+    function press() {
+        if (root.enabled) {
+            root.pressed();
+        }
+    }
+
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        root.press();
+    }
 
     ta := TouchArea {
         enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
+        mouse-cursor: root.cursor;
         clicked => {
-            root.clicked();
+            root.press();
         }
     }
+
+    @children
+
+    // A disabled scope would miss losing the focus, and then show a ring
+    // that is no longer true, so a turned-off control leaves the Tab order
+    // instead. One turned off while it has the focus keeps its ring until
+    // Tab moves on, so the focus is never out of sight.
+    focus := FocusScope {
+        x: 0;
+        width: 0;
+        focus-on-tab-navigation: root.enabled && root.tab-stop;
+        // Like a native button, the control is pressed when the key comes
+        // back up, so a held key presses once and a dialog the press opens
+        // does not receive the key.
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.press();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if focus.has-focus: focus-ring := Rectangle {
+        x: root.ring-inset;
+        y: root.ring-inset;
+        width: parent.width - 2 * root.ring-inset;
+        height: parent.height - 2 * root.ring-inset;
+        border-radius: root.ring-inset > 0 ? Theme.radius-sm : root.border-radius;
+        border-width: Theme.focus-ring;
+        border-color: root.ring-color;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reusable: small outline button
+// ---------------------------------------------------------------------------
+// `label` is what the button shows; set `accessible-label` as well where the
+// label alone does not say what the button chooses.
+component SmallButton inherits Pressable {
+    in property <string> label;
+
+    height: Theme.field-height;
+    border-radius: Theme.radius-lg;
+    background: root.has-hover ? Theme.surface-hover : Theme.surface;
+    border-width: Theme.hairline;
+    border-color: Theme.border;
+    accessible-label: root.label;
+    animate background { duration: Theme.dur-fast; }
 
     Text {
         text: root.label;
@@ -164,6 +239,7 @@ component SmallButton inherits Rectangle {
         font-size: Theme.font-body;
         horizontal-alignment: center;
         vertical-alignment: center;
+        accessible-role: none;
     }
 }
 
@@ -172,28 +248,28 @@ component SmallButton inherits Rectangle {
 // ---------------------------------------------------------------------------
 // Grows from no width rather than from its label, so the choices of one
 // control are equally wide and keep their width when a bold label moves. A
-// click on the active choice does nothing: the form already shows it, and
-// choosing it again would reset the form.
-component Choice inherits Rectangle {
+// press on the active choice does nothing: the form already shows it, and
+// choosing it again would reset the form. Each choice switches what the form
+// below shows, so assistive technology hears it as a tab.
+component Choice inherits Pressable {
     in property <string> label;
     in property <bool> active;
-    in property <bool> enabled: true;
     in property <bool> bold-when-active;
     callback chosen();
 
     min-width: 0;
     preferred-width: 0;
     horizontal-stretch: 1;
-    background: root.active ? Theme.accent-muted : ta.has-hover && root.enabled ? Theme.surface-hover : transparent;
+    background: root.active ? Theme.accent-muted : root.has-hover ? Theme.surface-hover : transparent;
+    cursor: root.enabled && !root.active ? MouseCursor.pointer : MouseCursor.default;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
     animate background { duration: Theme.dur-base; }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled && !root.active ? pointer : default;
-        clicked => {
-            if (!root.active) {
-                root.chosen();
-            }
+    pressed => {
+        if (!root.active) {
+            root.chosen();
         }
     }
 
@@ -205,6 +281,7 @@ component Choice inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
         overflow: elide;
+        accessible-role: none;
     }
 }
 
@@ -216,6 +293,8 @@ component Choice inherits Rectangle {
 // only focuses the input.
 component PasswordInput {
     in-out property <string> text;
+    // What assistive technology calls the input.
+    in property <string> label;
     in property <bool> masked: true;
     in property <bool> enabled: true;
     in property <bool> selection-clipboard: false;
@@ -251,6 +330,7 @@ component PasswordInput {
             text-cursor-width: 2px;
             selection-background-color: Theme.accent;
             input-type: root.masked ? InputType.password : InputType.text;
+            accessible-label: root.label;
             text <=> root.text;
             single-line: true;
             enabled: root.enabled;
@@ -284,28 +364,19 @@ component PasswordInput {
 // ---------------------------------------------------------------------------
 // Reusable: round title bar button
 // ---------------------------------------------------------------------------
-component TitleButton inherits Rectangle {
+component TitleButton inherits Pressable {
     in property <string> label;
-    callback clicked();
 
     width: Theme.icon-btn;
     height: Theme.icon-btn;
     border-radius: self.width / 2;
-    background: ta.has-hover ? Theme.surface-hover : Theme.surface;
-    accessible-role: button;
+    background: self.has-hover ? Theme.surface-hover : Theme.surface;
+    cursor: MouseCursor.default;
+    // Like the buttons of a frame the system draws, these stay out of the Tab
+    // order; the system's own keys minimize and close the window.
+    tab-stop: false;
     accessible-label: root.label;
-    accessible-action-default => {
-        root.clicked();
-    }
     animate background { duration: Theme.dur-fast; }
-
-    ta := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-
-    @children
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +418,7 @@ component TitleBar inherits Rectangle {
         x: close-button.x - Theme.gap-md - self.width;
         y: (parent.height - self.height) / 2;
         label: "Minimize";
-        clicked => {
+        pressed => {
             root.minimize-window();
         }
 
@@ -362,7 +433,7 @@ component TitleBar inherits Rectangle {
         x: parent.width - Theme.gap-md - self.width;
         y: (parent.height - self.height) / 2;
         label: "Close";
-        clicked => {
+        pressed => {
             root.close-window();
         }
 
@@ -427,6 +498,11 @@ export component AppWindow inherits Window {
     property <bool> require-password-repeated:
         (mode == Mode.passphrase-encrypt || mode == Mode.keygen) && hide-password;
     property <bool> require-key: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt;
+    // The password unlocks a private key, or seals a new one.
+    property <bool> private-key-password: mode == Mode.recipient-decrypt || mode == Mode.keygen;
+    property <string> password-name: private-key-password ? "Private key password" : "Password";
+    property <string> password-noun: password-name.to-lowercase();
+    property <string> confirm-password-name: "Confirm " + password-noun;
     property <bool> password-match: password == password-repeated;
     property <bool> disable-start: is-working || (mode == Mode.passphrase-encrypt && (input-path == "" || password == "" || (require-password-repeated && !password-match))) || (mode == Mode.passphrase-decrypt && (input-path == "" || password == "")) || (mode == Mode.recipient-encrypt && (input-path == "" || key-path == "" || key-invalid)) || (mode == Mode.recipient-decrypt && (input-path == "" || password == "" || key-path == "" || key-invalid)) || (mode == Mode.keygen && (keygen-output-dir == "" || password == "" || (require-password-repeated && !password-match)));
     property <bool> is-encrypt-mode: mode == Mode.passphrase-encrypt || mode == Mode.recipient-encrypt || mode == Mode.keygen;
@@ -546,6 +622,8 @@ export component AppWindow inherits Window {
                 background: Theme.input-bg;
                 border-width: Theme.hairline;
                 border-color: Theme.border;
+                accessible-role: tab-list;
+                accessible-label: "Mode";
 
                 HorizontalLayout {
                     padding: Theme.gap-xs;
@@ -643,24 +721,27 @@ export component AppWindow inherits Window {
                     if combined-picker: SmallButton {
                         width: Theme.btn-width;
                         label: "Choose";
+                        accessible-label: "Choose source file or folder";
                         enabled: !is-working;
-                        clicked => {
+                        pressed => {
                             root.select-input-file();
                         }
                     }
                     if !combined-picker: SmallButton {
                         width: Theme.btn-width;
                         label: "File";
+                        accessible-label: "Choose source file";
                         enabled: !is-working;
-                        clicked => {
+                        pressed => {
                             root.select-input-file();
                         }
                     }
                     if !combined-picker: SmallButton {
                         width: Theme.btn-width;
                         label: "Folder";
+                        accessible-label: "Choose source folder";
                         enabled: !is-working;
-                        clicked => {
+                        pressed => {
                             root.select-input-folder();
                         }
                     }
@@ -723,8 +804,9 @@ export component AppWindow inherits Window {
                     SmallButton {
                         width: Theme.btn-width;
                         label: "Choose";
+                        accessible-label: is-encrypt-mode ? "Choose where to save the encrypted file" : "Choose output location";
                         enabled: !is-working && !(is-encrypt-mode && input-path == "");
-                        clicked => {
+                        pressed => {
                             if (is-encrypt-mode) {
                                 root.select-output-file();
                             } else {
@@ -770,6 +852,8 @@ export component AppWindow inherits Window {
                     background: Theme.surface;
                     border-width: Theme.hairline;
                     border-color: Theme.border;
+                    accessible-role: tab-list;
+                    accessible-label: "Key source";
 
                     HorizontalLayout {
                         padding: Theme.gap-2xs;
@@ -854,8 +938,9 @@ export component AppWindow inherits Window {
                     SmallButton {
                         width: Theme.btn-width;
                         label: "Choose";
+                        accessible-label: mode == Mode.recipient-encrypt ? "Choose public key" : "Choose private key";
                         enabled: !is-working;
-                        clicked => {
+                        pressed => {
                             root.select-key-file();
                         }
                     }
@@ -897,21 +982,18 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
 
-                            Rectangle {
+                            fp-copy-ta := Pressable {
                                 width: Theme.icon-btn;
                                 height: Theme.icon-btn;
                                 y: (parent.height - self.height) / 2;
                                 border-radius: Theme.radius-sm;
-                                background: fp-copy-ta.has-hover ? Theme.surface-hover : transparent;
+                                background: self.has-hover ? Theme.surface-hover : transparent;
+                                accessible-label: fp-copied ? "Fingerprint copied" : "Copy fingerprint";
                                 animate background { duration: Theme.dur-fast; }
-
-                                fp-copy-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.copy-fingerprint();
-                                        fp-copied = true;
-                                        fp-copied-timer.running = true;
-                                    }
+                                pressed => {
+                                    root.copy-fingerprint();
+                                    fp-copied = true;
+                                    fp-copied-timer.running = true;
                                 }
 
                                 fp-copied-timer := Timer {
@@ -993,8 +1075,9 @@ export component AppWindow inherits Window {
                     SmallButton {
                         width: Theme.btn-width;
                         label: "Choose";
+                        accessible-label: "Choose key pair folder";
                         enabled: !is-working;
-                        clicked => {
+                        pressed => {
                             root.select-keygen-output-dir();
                         }
                     }
@@ -1007,7 +1090,7 @@ export component AppWindow inherits Window {
                 FieldGap { }
 
                 Text {
-                    text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Private key password" : "Password";
+                    text: password-name;
                     color: Theme.text-secondary;
                     font-size: Theme.font-body;
                 }
@@ -1038,6 +1121,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 40px;
                         height: parent.height;
                         text <=> root.password;
+                        label: password-name;
                         masked: hide-password;
                         enabled: !is-working;
                         selection-clipboard: root.selection-clipboard;
@@ -1054,9 +1138,10 @@ export component AppWindow inherits Window {
                     if password == "" && !pwd-ti.has-focus: Text {
                         x: Theme.field-pad;
                         y: (parent.height - self.preferred-height) / 2;
-                        text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Enter private key password" : "Enter password";
+                        text: "Enter " + password-noun;
                         color: Theme.text-disabled;
                         font-size: Theme.font-body;
+                        accessible-role: none;
                     }
 
                     // Eye icon (toggle password visibility)
@@ -1099,14 +1184,17 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Clickable area for the eye
-                    TouchArea {
+                    // The button over the eye
+                    Pressable {
                         x: parent.width - 38px;
                         width: 38px;
                         height: parent.height;
                         enabled: !is-working;
-                        mouse-cursor: self.enabled ? pointer : default;
-                        clicked => {
+                        ring-inset: Theme.gap-sm;
+                        accessible-label: "Show " + password-noun;
+                        accessible-checkable: true;
+                        accessible-checked: !root.hide-password;
+                        pressed => {
                             root.hide-password = !root.hide-password;
                         }
                     }
@@ -1177,7 +1265,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: mode == Mode.keygen ? "Confirm private key password" : "Confirm password";
+                    text: confirm-password-name;
                     color: Theme.text-secondary;
                     font-size: Theme.font-body;
                 }
@@ -1209,6 +1297,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 36px;
                         height: parent.height;
                         text <=> root.password-repeated;
+                        label: confirm-password-name;
                         enabled: parent.field-enabled;
                         selection-clipboard: root.selection-clipboard;
                         accepted => {
@@ -1224,9 +1313,10 @@ export component AppWindow inherits Window {
                     if password-repeated == "" && !rpwd-ti.has-focus: Text {
                         x: Theme.field-pad;
                         y: (parent.height - self.preferred-height) / 2;
-                        text: mode == Mode.keygen ? "Re-enter private key password" : "Re-enter password";
+                        text: "Re-enter " + password-noun;
                         color: Theme.text-disabled;
                         font-size: Theme.font-body;
+                        accessible-role: none;
                     }
 
                     // Match dot (inside field, right edge)
@@ -1288,6 +1378,8 @@ export component AppWindow inherits Window {
                 font-size: Theme.font-body;
                 wrap: word-wrap;
                 overflow: elide;
+                // Assistive technology reads each new message out.
+                accessible-live-region: polite;
             }
         }
 
@@ -1299,46 +1391,43 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: Theme.gap-md;
 
-            Rectangle {
+            reset-ta := Pressable {
                 width: Theme.reset-width;
                 height: Theme.action-height;
+                enabled: !form-is-clean && !is-working;
                 border-radius: Theme.radius-lg;
-                background: form-is-clean || is-working ? transparent : reset-ta.has-hover ? Theme.surface-hover : transparent;
-                border-width: form-is-clean || is-working ? 0px : Theme.hairline;
+                background: self.has-hover ? Theme.surface-hover : transparent;
+                border-width: self.enabled ? Theme.hairline : 0px;
                 border-color: Theme.border;
+                accessible-label: "Reset";
                 animate background { duration: Theme.dur-fast; }
                 animate border-width { duration: Theme.dur-fast; }
-
-                reset-ta := TouchArea {
-                    enabled: !form-is-clean && !is-working;
-                    mouse-cursor: self.enabled ? pointer : default;
-                    clicked => {
-                        root.clear-form();
-                    }
+                pressed => {
+                    root.clear-form();
                 }
 
                 Text {
                     text: "Reset";
-                    color: form-is-clean || is-working ? Theme.text-off : Theme.text-dim;
+                    color: reset-ta.enabled ? Theme.text-dim : Theme.text-off;
                     font-size: Theme.font-body;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                    accessible-role: none;
                 }
             }
 
-            Rectangle {
+            start-ta := Pressable {
                 horizontal-stretch: 1;
                 height: Theme.action-height;
+                enabled: !disable-start;
                 border-radius: Theme.radius-lg;
-                background: disable-start ? Theme.surface : start-ta.has-hover ? Theme.accent-btn-hover : Theme.accent-btn;
+                background: disable-start ? Theme.surface : self.has-hover ? Theme.accent-btn-hover : Theme.accent-btn;
+                // The usual ring would hardly show on the accent colour.
+                ring-color: Theme.text;
+                accessible-label: button-text;
                 animate background { duration: Theme.dur-fast; }
-
-                start-ta := TouchArea {
-                    enabled: !disable-start;
-                    mouse-cursor: self.enabled ? pointer : default;
-                    clicked => {
-                        root.start-operation();
-                    }
+                pressed => {
+                    root.start-operation();
                 }
 
                 Text {
@@ -1348,6 +1437,7 @@ export component AppWindow inherits Window {
                     font-weight: Theme.weight-medium;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                    accessible-role: none;
                 }
             }
         }

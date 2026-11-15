@@ -11,7 +11,8 @@ which the server cannot reach, with answers given by `pick`.
   tree                list the elements that have an id or accessibility data
   status              print the status line at the bottom of the window
   click TARGET [N]    click an element by qualified id (`AppWindow::start-ta`)
-                      or by visible label (`Choose`); N picks one of several
+                      or by accessible name (`Choose source file or folder`, as
+                      `tree` lists it); N picks one of several
   type [TEXT]         type TEXT into the focused field, one key at a time; without
                       TEXT, read it from stdin (keeps a passphrase out of history)
   call TOOL [JSON]    call any Slint MCP tool; the window handle is filled in

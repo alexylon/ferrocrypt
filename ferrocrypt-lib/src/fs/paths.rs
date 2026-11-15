@@ -279,12 +279,12 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
 ///
 /// The parent directory is the caller's trust boundary: kept readable
 /// and never truncated so the operator can always locate the conflict,
-/// but control and bidirectional-formatting characters in it are still
-/// escaped so a hostile intermediate component cannot smuggle a terminal
-/// escape sequence into the message. The final component can be
-/// attacker-influenced (an input-derived file stem, an archive-chosen
-/// root name), so it is routed through the stricter, length-bounded
-/// sanitizer.
+/// but control, bidirectional-formatting, and line-separator characters
+/// in it are still escaped so a hostile intermediate component cannot
+/// smuggle a terminal escape sequence into the message or break it onto
+/// a new line. The final component can be attacker-influenced (an
+/// input-derived file stem, an archive-chosen root name), so it is
+/// routed through the stricter, length-bounded sanitizer.
 pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "{label} already exists: {}",
@@ -591,27 +591,33 @@ mod tests {
         }
     }
 
-    /// Control and bidi characters in an *intermediate* directory
-    /// component are escaped too, not only in the final component. The
-    /// parent stays whole and readable, but it must never carry a raw
-    /// terminal escape, newline, or direction-override into the message.
-    /// The direction-override assertion is separate from the control-byte
-    /// one because a bidi character is not an ASCII control byte.
+    /// Control, bidi, and line-separator characters in an *intermediate*
+    /// directory component are escaped too, not only in the final
+    /// component. The parent stays whole and readable, but it must never
+    /// carry a raw terminal escape, newline, direction character, or line
+    /// separator into the message. The last two have their own assertions
+    /// because neither is an ASCII control byte.
     #[test]
     fn already_exists_error_escapes_hostile_parent_component() {
-        match already_exists_error("Output", Path::new("sa\u{202e}fe/ev\u{1b}il\ndir/file.fcr")) {
+        let path =
+            Path::new("sa\u{202e}fe/ev\u{1b}il\ndir/li\u{2028}ne\u{2029}s/ma\u{200f}rk/file.fcr");
+        match already_exists_error("Output", path) {
             CryptoError::InvalidInput(msg) => {
                 assert_eq!(
                     msg,
-                    "Output already exists: sa\\u{202e}fe/ev\\u{1b}il\\ndir/file.fcr"
+                    "Output already exists: sa\\u{202e}fe/ev\\u{1b}il\\ndir/li\\u{2028}ne\\u{2029}s/ma\\u{200f}rk/file.fcr"
                 );
                 assert!(
                     !msg.chars().any(char::is_control),
                     "raw control character leaked from parent: {msg:?}"
                 );
                 assert!(
-                    !msg.contains('\u{202e}'),
-                    "raw direction-override leaked from parent: {msg:?}"
+                    !msg.contains(['\u{202e}', '\u{200f}']),
+                    "raw direction character leaked from parent: {msg:?}"
+                );
+                assert!(
+                    !msg.contains(['\u{2028}', '\u{2029}']),
+                    "raw line separator leaked from parent: {msg:?}"
                 );
             }
             other => panic!("expected InvalidInput, got {other:?}"),

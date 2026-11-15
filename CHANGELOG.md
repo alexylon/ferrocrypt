@@ -7,6 +7,9 @@ All notable changes to FerroCrypt are documented in this file.
 ### Added
 - **The desktop app is available on the Snap Store for Linux: `sudo snap install ferrocrypt`.** Each release now publishes it for 64-bit Intel/AMD and ARM.
 
+### Fixed
+- **Library error messages now escape control characters, text-direction characters, and the line and paragraph separators (U+2028, U+2029) wherever they show the output folder.** Three messages a decrypt can return after its output is complete showed the folder unescaped, and the others did not escape the two separators, so a terminal or log viewer could run an escape sequence, reorder the text, or split a message.
+
 ## [0.3.1] - 2026-11-07
 
 ### Security

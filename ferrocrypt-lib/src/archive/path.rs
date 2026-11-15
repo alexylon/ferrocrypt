@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::CryptoError;
-use crate::error::sanitize_for_display;
+use crate::error::{LINE_SEPARATORS, sanitize_for_display};
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
@@ -180,10 +180,6 @@ const BIDI_EMBEDDINGS_AND_OVERRIDES: RangeInclusive<char> = '\u{202A}'..='\u{202
 /// The bidirectional isolates and their terminator (LRI, RLI, FSI,
 /// PDI), which set the direction of a whole span of text.
 const BIDI_ISOLATES: RangeInclusive<char> = '\u{2066}'..='\u{2069}';
-
-/// The Unicode line and paragraph separators, which a plain-text
-/// consumer such as a terminal or a log breaks a line at.
-const LINE_SEPARATORS: RangeInclusive<char> = '\u{2028}'..='\u{2029}';
 
 /// Returns whether `c` is one of the non-ASCII code points FORMAT.md
 /// §9.6 excludes from every component: the C1 controls, the nine
@@ -580,6 +576,26 @@ mod tests {
                 ),
                 "U+{:04X} should reject",
                 c as u32,
+            );
+        }
+    }
+
+    /// The non-ASCII format controls the grammar rejects from names must
+    /// also be escaped wherever text is displayed, including the most
+    /// permissive display: the readable directory prefix of a conflict
+    /// message.
+    #[test]
+    fn the_readable_prefix_escapes_every_format_control_the_grammar_rejects() {
+        for c in (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .filter(|&c| is_format_control(c))
+        {
+            let raw = c.to_string();
+            assert_eq!(
+                crate::error::sanitize_prefix_for_display(&raw),
+                c.escape_default().to_string(),
+                "U+{:04X} is not escaped",
+                u32::from(c),
             );
         }
     }

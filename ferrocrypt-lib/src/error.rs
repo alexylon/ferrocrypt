@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use thiserror::Error;
 
 use crate::UnauthenticatedRecipientMode;
@@ -235,9 +237,10 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
 /// attacker-chosen as a name found inside an archive. The "already
 /// exists" conflict messages instead route through
 /// `fs::paths::already_exists_error`, which keeps the trusted parent
-/// directory readable and untruncated — escaping only control and
-/// bidirectional-formatting characters in it — and routes the final
-/// component through this stricter, truncating sanitizer.
+/// directory readable and untruncated — escaping only control,
+/// bidirectional-formatting, and line-separator characters in it — and
+/// routes the final component through this stricter, truncating
+/// sanitizer.
 pub(crate) fn sanitize_path_for_display(path: &std::path::Path) -> String {
     sanitize_for_display(&path.display().to_string())
 }
@@ -281,13 +284,26 @@ pub(crate) fn is_bidi_control(c: char) -> bool {
     )
 }
 
+/// The Unicode line and paragraph separators, which a plain-text
+/// consumer such as a terminal or a log breaks a line at. The FCA path
+/// grammar rejects them, and both error-message sanitizers escape them.
+pub(crate) const LINE_SEPARATORS: RangeInclusive<char> = '\u{2028}'..='\u{2029}';
+
+/// Returns whether `c` must be escaped even in text that is otherwise
+/// kept readable: a control character, a bidirectional-formatting
+/// character, or a line separator. [`sanitize_for_display`] escapes all
+/// of these too, together with every other non-ASCII character.
+fn must_escape_in_readable_text(c: char) -> bool {
+    c.is_control() || is_bidi_control(c) || LINE_SEPARATORS.contains(&c)
+}
+
 /// Renders a trusted path prefix — the parent directory of an
 /// "already exists" conflict — for an error message. Printable
 /// characters pass through unchanged, including readable non-ASCII such
 /// as accented Latin or CJK, so the operator can still read and locate
-/// the directory. Control and bidirectional-formatting characters are
-/// escaped so the prefix cannot inject a terminal escape sequence or
-/// visually reorder the message.
+/// the directory. The characters `must_escape_in_readable_text` names
+/// are escaped, so the prefix cannot inject a terminal escape sequence,
+/// visually reorder the message, or break it onto a new line.
 ///
 /// Unlike [`sanitize_for_display`], the result is not length-bounded:
 /// the operator uses the parent to locate the conflict, so it is kept
@@ -297,7 +313,7 @@ pub(crate) fn is_bidi_control(c: char) -> bool {
 pub(crate) fn sanitize_prefix_for_display(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() || is_bidi_control(c) {
+        if must_escape_in_readable_text(c) {
             // Same escape style as `write_sanitized_char`.
             out.extend(c.escape_default());
         } else {
@@ -305,6 +321,13 @@ pub(crate) fn sanitize_prefix_for_display(text: &str) -> String {
         }
     }
     out
+}
+
+/// Renders the caller's own directory, such as the output directory of
+/// a decrypt, for an error message: [`sanitize_prefix_for_display`] over
+/// `Path::display`, so it stays readable and whole.
+pub(crate) fn sanitize_trusted_dir_for_display(dir: &std::path::Path) -> String {
+    sanitize_prefix_for_display(&dir.display().to_string())
 }
 
 /// Renders `: {path}` when an optional sanitized path is present, and

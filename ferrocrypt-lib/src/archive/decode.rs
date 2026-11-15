@@ -58,7 +58,7 @@ use cap_std::fs::{Dir, File};
 
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
-use crate::error::sanitize_for_display;
+use crate::error::{sanitize_for_display, sanitize_trusted_dir_for_display};
 use crate::fs::paths::{
     INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, path_occupied,
     sanitize_path_keeping_parent,
@@ -996,13 +996,14 @@ const STAGED_HANDLE_UNAVAILABLE: &str = "Cannot hold a handle to the staged outp
 /// directory. The root name is included so the operator can locate the output
 /// if that directory was renamed. The message says the output is complete
 /// because content, promotion, and the final-entry check already succeeded.
-/// The operator-supplied directory renders untruncated; the archive-supplied
-/// root name is escaped and bounded.
+/// The operator-supplied directory renders readable and untruncated, with
+/// control, bidirectional, and line-separator characters escaped; the
+/// archive-supplied root name is escaped and bounded.
 fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Output {} is complete but its directory changed: {}",
         sanitize_for_display(&root_name.to_string_lossy()),
-        output_dir.display()
+        sanitize_trusted_dir_for_display(output_dir)
     ))
 }
 
@@ -1026,7 +1027,7 @@ fn output_directory_unconfirmed(
         format!(
             "Output {} is complete, but its directory could not be confirmed: {}: {error}",
             sanitize_for_display(&root_name.to_string_lossy()),
-            output_dir.display()
+            sanitize_trusted_dir_for_display(output_dir)
         ),
     ))
 }
@@ -1046,7 +1047,7 @@ fn staged_link_retained(
         format!(
             "Output {} in {} is complete, but {}",
             sanitize_for_display(&root_name.to_string_lossy()),
-            output_dir.display(),
+            sanitize_trusted_dir_for_display(output_dir),
             staged_link_report(incomplete_name, &source),
         ),
     ))
@@ -1714,8 +1715,8 @@ fn remove_staged_directory(
 
 /// Builds the "Output already exists: {dir}/{root}" rejection via the
 /// shared constructor: the operator-chosen output directory renders
-/// without truncation, with control and bidirectional characters escaped;
-/// the archive-chosen root name — the final
+/// without truncation, with control, bidirectional, and line-separator
+/// characters escaped; the archive-chosen root name — the final
 /// component — is escaped and bounded. Used by the step-8 occupancy
 /// pre-check and the step-15 promotion failure.
 fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
@@ -3862,6 +3863,37 @@ mod tests {
             victim_mode, 0o644,
             "victim at the swapped path must be untouched"
         );
+    }
+
+    /// The post-commit errors that name the output directory keep it
+    /// readable but escape the characters that could run a terminal
+    /// sequence, reorder the message, or break it onto a new line.
+    #[test]
+    fn post_commit_errors_escape_the_output_directory() {
+        let dir = Path::new("Données\u{1b}[2J\u{202e}/li\u{2028}ne");
+        let root = OsStr::new("data");
+        let messages = [
+            output_directory_changed(dir, root).to_string(),
+            output_directory_unconfirmed(dir, root, CryptoError::Io(io::Error::other("gone")))
+                .to_string(),
+            staged_link_retained(
+                dir,
+                OsStr::new("data.incomplete"),
+                root,
+                io::Error::other("busy"),
+            )
+            .to_string(),
+        ];
+        for message in messages {
+            assert!(
+                message.contains("Données\\u{1b}[2J\\u{202e}/li\\u{2028}ne"),
+                "the directory must render readable and escaped: {message}"
+            );
+            assert!(
+                !message.contains(['\u{1b}', '\u{202e}', '\u{2028}']),
+                "a raw character leaked: {message:?}"
+            );
+        }
     }
 
     /// The occupied-output rejection embeds the archive-chosen root

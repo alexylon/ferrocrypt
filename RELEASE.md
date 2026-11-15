@@ -183,9 +183,13 @@ version, cargo-semver-checks counts a change of the second number, such as
 - For a release without a pre-release suffix: nothing in `README.md` describes
   a pre-release. The release changes only the version numbers.
 - For a pre-release: the rule for `README.md` in `ferrocrypt-lib/release.toml`
-  sets `prerelease = true` only if the README describes a changed API or CLI,
-  such as for `0.4.0-rc.1`. Without it, the README's install commands keep
-  naming the last release without a suffix.
+  has no `prerelease = true`, so the README's install commands keep naming the
+  last release without a suffix. If the README describes an API or CLI that
+  only the pre-release has, such as for `0.4.0-rc.1`, add `prerelease = true`
+  to that rule by hand first.
+- If the release writes bytes that no frozen fixture set covers, such as a new
+  format version, recipient type, or feature: freeze its fixtures first, as
+  `ferrocrypt-lib/tests/fixtures/frozen/README.md` describes.
 
 The tests need no run of their own: the release runs them. To run them alone,
 for example before you start, use `./scripts/release_hook.sh`. If it changes

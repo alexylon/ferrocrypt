@@ -11,8 +11,10 @@ FerroCrypt is security-sensitive Rust software. Please optimize for correctness,
 - `ferrocrypt-lib` — core encryption library
 - `ferrocrypt-cli` — CLI frontend
 - `ferrocrypt-desktop` — Slint desktop app
+- `ferrocrypt-test-support` — helpers the tests share, not published
 - `ferrocrypt-lib/tests` and `ferrocrypt-cli/tests` — integration tests
 - `ferrocrypt-lib/FORMAT.md` — encrypted-file and key-file format specification
+- [`THREAT_MODEL.md`](THREAT_MODEL.md) — security guarantees, their assumptions, and when a finding blocks a release
 
 ### Workspace note
 
@@ -20,6 +22,7 @@ The Cargo workspace currently includes:
 
 - `ferrocrypt-lib`
 - `ferrocrypt-cli`
+- `ferrocrypt-test-support`
 
 `ferrocrypt-desktop` is outside the workspace and must be built and checked separately when changed.
 
@@ -45,9 +48,18 @@ Run the checks that match your change.
 
 ```bash
 ./scripts/fmt.sh
+./scripts/check_terminology.sh
 cargo test -- --test-threads=1
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --package ferrocrypt --features unstable-fuzzing --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --package ferrocrypt-cli
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude ferrocrypt-cli
 ```
+
+If you changed the public API of `ferrocrypt-lib`, also run the API check CI
+runs; [`RELEASE.md`](RELEASE.md) explains it. If you changed the format
+corpus under `ferrocrypt-lib/testvectors/wire/`, run
+`python3 ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py`.
 
 ### Desktop changes (`ferrocrypt-desktop`)
 
@@ -55,30 +67,36 @@ cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/fmt.sh
 (cd ferrocrypt-desktop && cargo build)
 (cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings)
+(cd ferrocrypt-desktop && cargo clippy --all-targets --features mcp -- -D warnings)
+(cd ferrocrypt-desktop && cargo test -- --test-threads=1)
 ```
 
 If you changed desktop behavior, also manually verify the important user flows:
 
-- symmetric encrypt
-- symmetric decrypt
-- hybrid encrypt
-- hybrid decrypt
-- key generation
-- key validation / fingerprint display
+- encrypt and decrypt with a password (the Password tab)
+- encrypt with a public key and decrypt with a private key (the Key pair tab)
+- create a key pair
+- key validation and fingerprint display
+- the progress bar during a long operation
+- the same flows with the keyboard alone, and with a screen reader
 
 An agent or a script can drive these flows too: `scripts/desktop_mcp.py run` starts a development build with Slint's MCP server on, and `scripts/desktop_mcp.py` lists the commands that click, type, choose files, and take screenshots.
 
 ### Documentation-only changes
 
-In general, doc-only changes do not require code build/test steps.
+Doc-only changes need no build or tests, but run `./scripts/check_terminology.sh`:
+CI checks the wording of the main docs.
 If you changed rustdoc examples or documentation that depends on generated output, run the relevant checks for that surface.
 
 ### Dependency changes
 
-If `cargo-audit` is installed locally, run:
+Every new or updated dependency of the workspace must pass `cargo vet`, which
+CI runs. Also check for known advisories, as CI does:
 
 ```bash
+cargo vet
 cargo audit
+cargo audit --file ferrocrypt-desktop/Cargo.lock
 ```
 
 ---
@@ -132,6 +150,10 @@ Any change affecting encrypted-file format, key-file format, metadata layout, he
 - `ferrocrypt-lib/FORMAT.md`
 - `README.md` if user-visible behavior changed
 - `CHANGELOG.md` under `[Unreleased]`
+
+The public conformance corpus under `ferrocrypt-lib/testvectors/wire/` is frozen:
+new cases go into a later corpus revision, and a frozen case is never edited or
+regenerated around changed behavior (`FORMAT.md` §12).
 
 ---
 
@@ -195,7 +217,9 @@ Update the docs that match your change:
 - `README.md` — user-visible behavior, installation, usage, limitations
 - `CHANGELOG.md` — add an entry under `[Unreleased]`
 - `ferrocrypt-lib/FORMAT.md` — format or compatibility changes
+- `ferrocrypt-lib/STRUCTURE.md` — module layout, public API shape, or architectural rules
 - rustdoc / examples — public API changes
+- [`THREAT_MODEL.md`](THREAT_MODEL.md) and `SECURITY.md` — security-relevant behavior; rule PR-01 in the threat model lists every document such a change must reconcile
 
 Documentation should match actual behavior, defaults, limitations, and compatibility guarantees.
 
@@ -215,6 +239,7 @@ Before opening or merging a PR, verify that:
 - [ ] `CHANGELOG.md` was updated under `[Unreleased]` when appropriate
 - [ ] `ferrocrypt-lib/FORMAT.md` was updated if format or compatibility changed
 - [ ] `README.md` or API docs were updated if behavior changed
+- [ ] `THREAT_MODEL.md`, `SECURITY.md`, and `STRUCTURE.md` were reconciled if security-relevant behavior changed (PR-01)
 
 ---
 

@@ -2532,9 +2532,9 @@ accept the same feature after implementing its specification, as defined in
 §12.2. The test type names of §3.3.1 and the test tags of §6 are never
 implemented, so a rejection they cause is invariant.
 
-Artifacts produced by `0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`, or
-untagged development revisions such as `main` are outside the cross-release
-promise until stable FerroCrypt release `0.3.0` is tagged.
+Artifacts produced by an alpha, beta, or release-candidate version, such as
+`0.3.0-rc.N` or `0.4.0-rc.N`, or by an untagged development revision such as
+`main`, are outside the cross-release promise.
 
 ### 11.5 Version-change rules
 

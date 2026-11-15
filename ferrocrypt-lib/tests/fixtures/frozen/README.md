@@ -13,8 +13,10 @@ This is the "never strand a recipient" guarantee, enforced across versions.
 
 ## Freezing a new version
 
-At release time, after `regenerate_fixtures` has produced the current
-`encrypted/`, `keys/`, and `source/`:
+For a release that writes bytes no frozen version covers, such as a new format
+version, recipient type, or feature, before the release and after
+`regenerate_fixtures` has produced the current `encrypted/`, `keys/`, and
+`source/`:
 
 ```bash
 cp -R tests/fixtures/encrypted tests/fixtures/keys tests/fixtures/source \

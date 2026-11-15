@@ -332,8 +332,9 @@ The CLI and desktop app SHOULD escape or otherwise render
 attacker-controlled paths without terminal control or misleading bidirectional
 display, including the three accepted marks. A library path result remains
 data rather than display text; an embedder that presents it to a user SHOULD
-apply equivalent rendering. These presentation protections are defence in
-depth in addition to the grammar, and the only protection against the marks.
+apply equivalent rendering, such as the library's `escape_path_for_display`.
+These presentation protections are defence in depth in addition to the
+grammar, and the only protection against the marks.
 
 ### TM-19 — Authority and publication
 

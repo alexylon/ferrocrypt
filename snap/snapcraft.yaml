@@ -24,8 +24,9 @@ description: |
   processed with 1 GiB of memory for a few seconds, which makes guessing it
   slow and costly for an attacker.
 
-  The app can open files in your home folder. To use files on USB drives and
-  other removable media, run:
+  The app can open files in your home folder. It cannot save encrypted files
+  or key pairs directly in the home folder itself, only in a folder inside it,
+  such as Documents. To use files on USB drives and other removable media, run:
   sudo snap connect ferrocrypt:removable-media
 adopt-info: ferrocrypt
 license: GPL-3.0-only

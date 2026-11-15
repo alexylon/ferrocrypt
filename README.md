@@ -51,6 +51,9 @@ Download the package for your system from [GitHub Releases](https://github.com/a
 | Linux, 64-bit ARM | `.tar.gz`, `musl` | The [Snap Store](#install-the-desktop-app-from-the-snap-store) |
 | Windows, 64-bit Intel/AMD | `.zip` | `.msi` installer |
 
+CI tests every build except two, which are built the same way but not yet run
+by CI: the macOS Intel build and the Linux ARM desktop app.
+
 Extract a command-line download and place `ferrocrypt` (`ferrocrypt.exe` on
 Windows) in a folder on your `PATH`. The Linux `gnu` build uses the system's C
 library and needs a recent version of it. The `musl` builds need no shared
@@ -63,6 +66,9 @@ first time you run it. If it does, open **System Settings → Privacy &
 Security**, click **Open Anyway**, then confirm **Open**. See
 [Apple's instructions](https://support.apple.com/en-us/102445).
 
+On Windows, the installer and the command-line tool are not code-signed either,
+so Microsoft Defender SmartScreen may warn the first time you run them.
+
 ### Install the desktop app from the Snap Store
 
 On Linux distributions with snap support, such as Ubuntu, install it from the
@@ -72,8 +78,9 @@ On Linux distributions with snap support, such as Ubuntu, install it from the
 sudo snap install ferrocrypt
 ```
 
-The snap can open files in your home folder. To use files on USB drives and
-other removable media, also run:
+The snap can open files in your home folder. It cannot save encrypted files or
+key pairs directly in the home folder itself, only in a folder inside it, such
+as Documents. To use files on USB drives and other removable media, also run:
 
 ```bash
 sudo snap connect ferrocrypt:removable-media
@@ -84,7 +91,7 @@ sudo snap connect ferrocrypt:removable-media
 Requires Rust 1.89 or later:
 
 ```bash
-cargo install ferrocrypt-cli@0.3.1
+cargo install ferrocrypt-cli@0.3.1 --locked
 ```
 
 The installed command is `ferrocrypt`.
@@ -106,7 +113,8 @@ for password and public-key workflows.
 Library operations are blocking. In an asynchronous application, run them on a
 blocking worker. Services processing untrusted input also need explicit limits,
 bounded concurrency, and a private work folder for each operation; see the
-[deployment requirements](THREAT_MODEL.md#tm-16--process-and-resource-profiles).
+deployment requirements in [TM-16](https://github.com/alexylon/ferrocrypt/blob/main/THREAT_MODEL.md#tm-16--process-and-resource-profiles)
+and [TM-17](https://github.com/alexylon/ferrocrypt/blob/main/THREAT_MODEL.md#tm-17--protected-user-profiles).
 
 ## Command-line usage
 
@@ -309,7 +317,7 @@ retain incomplete output after an error.
   at most 244 bytes. Windows-reserved names and characters, trailing dots or
   spaces, and certain invisible control characters are refused on every platform.
   Duplicate paths, names differing only by ASCII letter case, and equivalent
-  Unicode spellings are also refused. See the [full naming rules](ferrocrypt-lib/FORMAT.md#96-path-grammar).
+  Unicode spellings are also refused. See the [full naming rules](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/FORMAT.md#96-path-grammar).
 
 FerroCrypt is intended for file storage and transfer, not a complete system
 backup. Keep source files unchanged while encryption runs; it does not take a
@@ -332,7 +340,7 @@ be distinguished.
 | Passphrase or archive limit exceeded | Raise the matching [resource limit](#resource-limits) only for data from a trusted source. |
 | Header, recipient, or key-file limit exceeded | These additional limits are configurable through the library's `HeaderReadLimits` and `KeyReadLimits`. |
 | `already exists` | Choose another destination or move the conflicting entry after checking it. |
-| `No such file or directory` | Create the output folder first, or the folder of a `--save-as` path. |
+| `No such file or directory` (on Windows, `The system cannot find the path specified`) | Create the output folder first, or the folder of a `--save-as` path. |
 
 ### Incomplete output
 
@@ -372,9 +380,9 @@ libraries; the [technical reference](#technical-reference) lists them. The
 and the `curve25519-dalek` library that X25519 key agreement is built on was
 [audited by Quarkslab](https://blog.quarkslab.com/security-audit-of-dalek-libraries.html).
 The file format is fully specified and has public
-[test vectors](ferrocrypt-lib/testvectors/wire/README.md). The
-[security policy](SECURITY.md) covers dependency review, known limitations, and
-private vulnerability reporting. The [threat model](THREAT_MODEL.md) defines the
+[test vectors](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/testvectors/wire/README.md). The
+[security policy](https://github.com/alexylon/ferrocrypt/blob/main/SECURITY.md) covers dependency review, known limitations, and
+private vulnerability reporting. The [threat model](https://github.com/alexylon/ferrocrypt/blob/main/THREAT_MODEL.md) defines the
 security guarantees and their assumptions.
 
 - **Credentials:** use a strong password and protect your private keys.
@@ -393,7 +401,7 @@ security guarantees and their assumptions.
 - **Local access:** encryption cannot protect data from someone who controls
   your running system. The desktop toolkit may leave password text in memory
   until the app exits; the CLI's hidden prompt clears its own password buffers.
-  See the [memory and environment limitations](SECURITY.md#known-limitations).
+  See the [memory and environment limitations](https://github.com/alexylon/ferrocrypt/blob/main/SECURITY.md#known-limitations).
 - **Output folders:** decryption writes only inside the chosen output folder
   and refuses unsafe paths stored in the encrypted file. Choose an output
   folder that untrusted processes cannot modify, including its parent folders.
@@ -411,14 +419,14 @@ security guarantees and their assumptions.
 The format compatibility promise begins with **stable 0.3.0**: files and key
 pairs written by that release remain readable by every later release. Files
 from alpha, beta, release-candidate, or untagged development builds are outside
-that promise. See the [format compatibility policy](ferrocrypt-lib/FORMAT.md#114-compatibility-baselines).
+that promise. See the [format compatibility policy](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/FORMAT.md#114-compatibility-baselines).
 
 Releases before the 0.3.0 series use incompatible file and key formats. Decrypt
 older data with the release that created it, then re-encrypt it with the current
-release. See the [changelog](CHANGELOG.md) for migration and release details.
+release. See the [changelog](https://github.com/alexylon/ferrocrypt/blob/main/CHANGELOG.md) for migration and release details.
 
-The Rust API is pre-1.0: patch releases such as `0.3.x` preserve it; a minor
-release such as `0.4.0` may change it. Stored-file compatibility is a separate
+The Rust API is pre-1.0: patch releases such as `0.4.x` preserve it; a minor
+release such as `0.5.0` may change it. Stored-file compatibility is a separate
 promise. The minimum Rust versions stated above are checked in CI and may rise
 in a later release when a dependency or language change requires it.
 
@@ -479,7 +487,7 @@ and adds it to the application menu.
 
 </details>
 
-See [Contributing](CONTRIBUTING.md) for the repository layout and development checks.
+See [Contributing](https://github.com/alexylon/ferrocrypt/blob/main/CONTRIBUTING.md) for the repository layout and development checks.
 
 ## Technical reference
 
@@ -497,18 +505,18 @@ OpenSSL. The library forbids `unsafe` code.
 | Public recipient strings | Bech32 with the `fcr` prefix |
 | Files and folders inside the encrypted payload | FerroCrypt Archive (FCA) |
 
-- [File format](ferrocrypt-lib/FORMAT.md): encrypted files, key files, archive
+- [File format](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/FORMAT.md): encrypted files, key files, archive
   rules, and compatibility.
-- [Library structure](ferrocrypt-lib/STRUCTURE.md): API boundaries and implementation.
-- [Format test vectors](ferrocrypt-lib/testvectors/wire/README.md): fixed files
+- [Library structure](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/STRUCTURE.md): API boundaries and implementation.
+- [Format test vectors](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-lib/testvectors/wire/README.md): fixed files
   and expected results for checking an implementation against the format.
 
 ## License and credits
 
-Licensed under [GPL-3.0-only](LICENSE).
+Licensed under [GPL-3.0-only](https://github.com/alexylon/ferrocrypt/blob/main/LICENSE).
 
 The desktop app uses [Slint](https://slint.dev/) and the [Inter](https://rsms.me/inter/)
-font, licensed under the [SIL Open Font License 1.1](ferrocrypt-desktop/fonts/OFL.txt).
+font, licensed under the [SIL Open Font License 1.1](https://github.com/alexylon/ferrocrypt/blob/main/ferrocrypt-desktop/fonts/OFL.txt).
 Password strength scoring is adapted from
 [Proton Pass](https://github.com/protonpass/proton-pass-common) (GPLv3).
 

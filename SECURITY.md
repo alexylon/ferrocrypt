@@ -8,24 +8,30 @@ https://github.com/alexylon/ferrocrypt/security/advisories/new
 
 Please include:
 
-- the affected version (`ferrocrypt --version` for the CLI or desktop app, or
-  the crate version if integrating the library);
+- the affected version: `ferrocrypt --version` for the command-line tool, the
+  version in the window title for the desktop app, or the crate version if
+  integrating the library;
+- how it was installed: the Snap Store, a `.deb`, `.msi`, `.zip`, or `.tar.gz`
+  download, or Cargo;
 - the host platform and architecture;
 - a minimal reproducer (input bytes, command, or test case);
 - the impact you observed.
 
 ## Supported versions
 
-FerroCrypt is pre-1.0. Security fixes target the latest released minor
-series.
+FerroCrypt is pre-1.0. A security fix ships in the next release made from
+`main`: a patch release of the latest minor series, or the next minor release
+when `main` already holds an incompatible change. Earlier series are not
+patched.
 
-| Version    | Security fixes                                        |
-|------------|-------------------------------------------------------|
-| 0.3.x      | Supported.                                            |
-| ≤ 0.2.x    | Best-effort migration guidance only; no patches.      |
+| Version | Security fixes                                                                                              |
+|---------|-------------------------------------------------------------------------------------------------------------|
+| 0.4.x   | Supported.                                                                                                  |
+| 0.3.x   | No patches. Upgrade to 0.4.x, which reads every 0.3.x file and key.                                         |
+| 0.3.0 pre-releases (alpha, beta, rc) | No patches. Their files are outside the compatibility promise: decrypt with the pre-release that wrote the file, then re-encrypt it. |
+| ≤ 0.2.x | No patches. The formats are incompatible: decrypt with the release that wrote the file, then re-encrypt it. |
 
-When 0.4.x or later ships, the previous 0.x.y series will receive critical
-fixes for one minor cycle and then transition to migration-only.
+A new minor series ends support for the previous one.
 
 ## Dependency review
 
@@ -34,7 +40,10 @@ crate that handles payload encryption was [audited by NCC Group](https://www.ncc
 The [`curve25519-dalek`](https://crates.io/crates/curve25519-dalek) crate
 that X25519 key agreement is built on was [audited by Quarkslab](https://blog.quarkslab.com/security-audit-of-dalek-libraries.html).
 
-Dependency review is tracked with `cargo vet`. Several core crypto crates
+Dependency review is tracked with `cargo vet` for the Cargo workspace: the
+library and the command-line tool. The desktop app is outside the
+workspace: CI checks its dependencies only against the RustSec advisory
+database, with `cargo audit`. Several core crypto crates
 are covered by imported audits or maintainer-approved exemptions rather than
 first-party audits by this project, so a passing `cargo vet` run means the
 configured supply-chain policy is satisfied; it is not an independent audit
@@ -45,11 +54,13 @@ of each cryptographic dependency by the FerroCrypt project.
 The current stored formats are `.fcr` outer-container version `0x01`,
 FCA archive version `0x01`, public-key encoding version `0x01`, and
 private-key encoding version `0x01`.
-Public conformance test vectors are published with stable FerroCrypt
-release 0.3.0. The canonical format references are
-[`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md) and the in-tree
-fixture suite under `ferrocrypt-lib/tests/fixtures/` (an internal
-regression net, regenerated when the format intentionally changes).
+The canonical format reference is
+[`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md). Its public
+conformance corpus, [`ferrocrypt-lib/testvectors/wire/`](ferrocrypt-lib/testvectors/wire/README.md)
+(FORMAT.md §12.3), is frozen at the `v0.3.0` tag and published in the
+repository, not in the crate. The fixtures under
+`ferrocrypt-lib/tests/fixtures/` are an internal regression net, not a
+contract; of them, `frozen/v0.3.0/` is never regenerated.
 
 ## Threat model
 
@@ -161,8 +172,11 @@ before the next stable release.
   additionally reject any NTFS reparse point — including junctions and
   mount points — via an explicit `FILE_ATTRIBUTE_REPARSE_POINT`
   post-check. File creation uses `OpenOptions::create_new(true)` plus
-  an explicit `FollowSymlinks::No` flag. Permissions are always set on
-  an open handle, never via a re-resolved path. This symlink and
+  an explicit `FollowSymlinks::No` flag. Permissions are set on an open
+  handle, never via a re-resolved path, with one exception: failure cleanup
+  gives the owner back access to a staged folder by name, relative to its
+  parent's handle, because a folder without read permission cannot be
+  opened. This symlink and
   reparse-point hardening is the same code path on every supported OS.
   On Linux and macOS the final rename that commits the staged output to
   its requested name is anchored to that same handle as well, so a swap
@@ -185,8 +199,8 @@ before the next stable release.
   removes instead. Before success, FerroCrypt reads the committed inode's
   link count through its retained handle and requires exactly one link.
   The same requirement applies when the commit is performed inside the
-  platform file library, which on some mounts (Linux network and FUSE
-  filesystems among them) falls back to a hard link of its own without
+  platform file library, which FerroCrypt uses outside Linux and macOS, and
+  which on some Unix mounts falls back to a hard link of its own without
   reporting how its working-name removal went.
   If the working name cannot be removed, the link count cannot be read, or
   another link remains, the final name is already a complete commit.
@@ -288,8 +302,10 @@ before the next stable release.
   would exhaust the open-file limit on a large folder, so no handle is held
   between the two passes. On drives that hand a freed identity number to the
   next file created, ext4 and XFS among them, a replacement that removes the
-  original and recreates it can therefore still match. Every replacement that
-  leaves the original in place is refused.
+  original and recreates it can therefore still match. On Unix, every
+  replacement that leaves the original in place is refused. On Windows, which
+  records no identity for the files in a folder, a regular file of the same
+  length swapped in is archived (TM-09).
   ReFS reports a 64-bit
   truncation of its wider identifier, and a filesystem that gives every
   object the same non-zero identifier makes the checks detect nothing

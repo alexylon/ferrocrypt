@@ -258,6 +258,16 @@ jobs:
       - name: Run dependency audit
         run: cargo audit
 
+      # The desktop app is outside the workspace, so its lock file is audited
+      # on its own. The two quick-xml advisories wait for its dependents to
+      # upgrade, and neither reaches a user's files: wayland-scanner parses
+      # Wayland's protocol files at build time, and zbus_xml parses D-Bus
+      # interface descriptions.
+      - name: Run dependency audit (desktop app)
+        run: >-
+          cargo audit --file ferrocrypt-desktop/Cargo.lock
+          --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
   vet:
     runs-on: ubuntu-latest
     steps:

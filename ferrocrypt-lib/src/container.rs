@@ -47,16 +47,11 @@ use crate::format::{
     check_recipient_count, read_exact_or_truncated,
 };
 use crate::fs::atomic;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, parent_or_cwd, reject_occupied};
+use crate::fs::paths::{
+    OUTPUT_LABEL, STAGING_PREFIX, STAGING_SUFFIX, parent_or_cwd, reject_occupied,
+};
 use crate::progress::{ByteProgress, ProgressWriter};
 use crate::recipient::{self, RecipientEntry};
-
-/// Tempfile name prefix for the in-flight `.fcr` write. Combined with
-/// [`INCOMPLETE_SUFFIX`] this yields a `.ferrocrypt-*.incomplete`
-/// staging name in the destination directory; on success
-/// [`atomic::finalize_file`] promotes it to the user-visible
-/// output path.
-const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 
 /// Resource caps for encrypted-file headers.
 ///
@@ -623,7 +618,7 @@ pub(crate) fn resolve_encrypted_output_path(
 /// output path inside the input tree therefore cannot add the staging file to
 /// the archive.
 ///
-/// The file is staged under a `.ferrocrypt-*.incomplete` name in the
+/// The file is staged under a `ferrocrypt-….tmp` name in the
 /// destination's parent directory, then committed without overwriting via
 /// [`atomic::finalize_file`] after [`atomic::sync_file_durable`] completes
 /// the available file durability barrier. A pre-existing
@@ -703,7 +698,7 @@ where
         atomic::OutputDir::open_for_commit(parent_or_cwd(&output_path)).map_err(CryptoError::Io)?;
 
     let mut builder = tempfile::Builder::new();
-    builder.prefix(TEMP_FILE_PREFIX).suffix(INCOMPLETE_SUFFIX);
+    builder.prefix(STAGING_PREFIX).suffix(STAGING_SUFFIX);
     // Pin the on-disk mode at owner-only read/write so the `.fcr`
     // file's permissions cannot drift if `tempfile`'s default changes
     // in a future release. AEAD-protected ciphertext does not need to
@@ -848,6 +843,59 @@ mod tests {
             !moved.join("output.fcr").exists(),
             "the original directory must receive none either"
         );
+    }
+
+    /// The ciphertext is staged under a visible name: a hidden one is refused
+    /// where a confined app may not create hidden entries, such as directly
+    /// in the home folder under the Snap Store's `home` permission.
+    #[test]
+    fn encrypted_writer_stages_under_a_visible_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let output_path = tmp.path().join("output.fcr");
+        std::fs::write(&input, b"plaintext").unwrap();
+
+        let prepared = archive::prepare_archive(&input, archive::ArchiveLimits::default()).unwrap();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built = build_encrypted_header(
+            std::slice::from_ref(&entry),
+            b"",
+            [0x07u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
+
+        let mut staged_name = None;
+        write_encrypted_file_with_post_finalize(
+            prepared,
+            tmp.path(),
+            Some(&output_path),
+            "unused",
+            &built,
+            &|_| {},
+            WriteSeams {
+                after_staging: |staged: &Path| {
+                    staged_name = staged.file_name().map(|n| n.to_os_string());
+                    Ok(())
+                },
+                after_finalize: |_| Ok(()),
+            },
+        )
+        .expect("the encryption commits");
+
+        let staged_name = staged_name.expect("the seam saw the staged file");
+        let staged_name = staged_name.to_string_lossy();
+        assert!(!staged_name.starts_with('.'), "hidden: {staged_name}");
+        assert!(
+            staged_name.starts_with(STAGING_PREFIX) && staged_name.ends_with(STAGING_SUFFIX),
+            "got: {staged_name}"
+        );
+        assert!(output_path.is_file());
     }
 
     /// The writer must check the final path at its own return boundary, after

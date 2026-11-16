@@ -49,7 +49,8 @@ use crate::crypto::tlv::validate_tlv;
 use crate::error::{CryptoError, append_report};
 use crate::format;
 use crate::fs::paths::{
-    KEY_FILE_LABEL, OUTPUT_LABEL, encryption_base_name, open_input_file, reject_occupied,
+    KEY_FILE_LABEL, OUTPUT_LABEL, PRIVATE_KEY_STAGING_PREFIX, PUBLIC_KEY_STAGING_PREFIX,
+    STAGING_SUFFIX, encryption_base_name, open_input_file, reject_occupied,
 };
 use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 use crate::progress::{ByteProgress, ProgressReader};
@@ -853,8 +854,8 @@ fn generate_key_pair_with_seams(
     // be an entry of the anchored directory before it receives content.
     let mut private_builder = tempfile::Builder::new();
     private_builder
-        .prefix(".ferrocrypt-private_key-")
-        .suffix(".tmp");
+        .prefix(PRIVATE_KEY_STAGING_PREFIX)
+        .suffix(STAGING_SUFFIX);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -869,8 +870,8 @@ fn generate_key_pair_with_seams(
     // Unix permissions are 0o644.
     let mut public_builder = tempfile::Builder::new();
     public_builder
-        .prefix(".ferrocrypt-public_key-")
-        .suffix(".tmp");
+        .prefix(PUBLIC_KEY_STAGING_PREFIX)
+        .suffix(STAGING_SUFFIX);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1212,6 +1213,7 @@ mod tests {
     use crate::crypto::stream::payload_encryptor;
     use crate::error::FormatDefect;
     use crate::format;
+    use crate::fs::paths::STAGING_PREFIX;
     use crate::key::limits::KeyReadLimits;
     use crate::key::public::read_public_key;
     use crate::passphrase::Passphrase;
@@ -2659,7 +2661,8 @@ mod tests {
         assert_eq!(replacement_entries.len(), 1, "got: {replacement_entries:?}");
         let staged_name = replacement_entries[0].to_string_lossy();
         assert!(
-            staged_name.starts_with(".ferrocrypt-public_key-") && staged_name.ends_with(".tmp"),
+            staged_name.starts_with(PUBLIC_KEY_STAGING_PREFIX)
+                && staged_name.ends_with(STAGING_SUFFIX),
             "the reported survivor must be the staged public key, got: {staged_name}"
         );
     }
@@ -2668,8 +2671,8 @@ mod tests {
     fn staged_key_tempfile(dir: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;
         let mut tmp = tempfile::Builder::new()
-            .prefix(".ferrocrypt-keygen-test-")
-            .suffix(".tmp")
+            .prefix(&format!("{STAGING_PREFIX}keygen-test-"))
+            .suffix(STAGING_SUFFIX)
             .tempfile_in(dir)
             .unwrap();
         tmp.as_file_mut().write_all(bytes).unwrap();
@@ -3066,7 +3069,7 @@ mod tests {
     fn assert_no_staged_temporary(dir: &Path) {
         let staged: Vec<_> = leftover_entries(dir, "")
             .into_iter()
-            .filter(|name| name.to_string_lossy().starts_with(".ferrocrypt-"))
+            .filter(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
             .collect();
         assert!(
             staged.is_empty(),

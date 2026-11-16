@@ -15,19 +15,47 @@ use std::path::Path;
 use crate::CryptoError;
 use crate::error::{sanitize_for_display, sanitize_path_for_display, sanitize_prefix_for_display};
 
-/// Suffix appended to atomic-write working names so plaintext (or any
-/// not-yet-finalised output) is never visible under the final name.
-/// Used by `container::write_encrypted_file` for the streaming
-/// `.fcr` tempfile and by `archive::decode::unarchive` for the per-root
-/// rename-into-place pattern. `pub` (in a private module) so
+/// Suffix of the working name `{root}.incomplete` that decryption extracts
+/// under (`archive::decode::unarchive`), so plaintext is never visible under
+/// the final name before every check passes. `pub` (in a private module) so
 /// `fuzz_exports` can re-export it for the full-pipeline fuzz oracle.
 ///
-/// It is also the suffix of the extraction working name
-/// `{root}.incomplete` that `FORMAT.md` §9.11 step 10 fixes, so its text
-/// must not change. The frozen §9.6 component limit reserves exactly its
-/// length, and `archive::path` fails the build when that length changes;
-/// a change of the text alone is not detected.
+/// `FORMAT.md` §9.11 step 10 fixes this working name, so its text must not
+/// change. The frozen §9.6 component limit reserves exactly its length, and
+/// `archive::path` fails the build when that length changes; a change of the
+/// text alone is not detected.
 pub const INCOMPLETE_SUFFIX: &str = ".incomplete";
+
+/// The text of [`STAGING_PREFIX`], so the key-file prefixes can be built
+/// from it at compile time.
+macro_rules! staging_prefix {
+    () => {
+        "ferrocrypt-"
+    };
+}
+
+/// Start of the name of every file that encryption and key generation stage
+/// in the destination folder before giving it its final name.
+///
+/// It must not start with a dot. A hidden name is one a confined app may be
+/// refused: the Snap Store's `home` permission excludes hidden entries
+/// directly in the home folder, so the snap could not encrypt into it or
+/// create a key pair there.
+pub(crate) const STAGING_PREFIX: &str = staging_prefix!();
+
+const _: () = assert!(STAGING_PREFIX.as_bytes()[0] != b'.');
+
+/// Start of the name of a staged `private.key`.
+pub(crate) const PRIVATE_KEY_STAGING_PREFIX: &str = concat!(staging_prefix!(), "private_key-");
+
+/// Start of the name of a staged `public.key`.
+pub(crate) const PUBLIC_KEY_STAGING_PREFIX: &str = concat!(staging_prefix!(), "public_key-");
+
+/// End of the name of every staged file; see [`STAGING_PREFIX`]. It differs
+/// from [`INCOMPLETE_SUFFIX`], which may name plaintext, so a leftover that
+/// FerroCrypt staged, `ferrocrypt-….tmp`, never holds plaintext: it is
+/// ciphertext or a key file.
+pub(crate) const STAGING_SUFFIX: &str = ".tmp";
 
 /// Conflict-message label for the encrypted-file or extracted output
 /// artefact ("Output already exists: …"). The occupancy pre-check

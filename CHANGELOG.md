@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The desktop app from the Snap Store can now encrypt files and create key pairs directly in the home folder.** Both failed there with "Permission denied". Encryption and key generation now name their temporary files `ferrocrypt-….tmp`, no longer hidden, on every system. An interrupted run can leave one behind; it holds no plaintext and can be deleted. The snap still cannot create a file or folder with a hidden name, starting with a dot, directly in the home folder, such as `.ssh.fcr`.
+
 ## [0.4.0] - 2026-11-15
 
 ### Added

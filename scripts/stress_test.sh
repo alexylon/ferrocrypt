@@ -1311,7 +1311,9 @@ for i in $(seq 1 "$SOAK_ITERS"); do
         fi
     fi
 done
-litter=$(find "$soakdir" \( -name '*.incomplete' -o -name '.tmp*' \) 2>/dev/null | wc -l | tr -d ' ')
+# Staging names: decryption's `*.incomplete`, and encryption's
+# `ferrocrypt-*.tmp` (`STAGING_PREFIX` and `STAGING_SUFFIX` in fs/paths.rs).
+litter=$(find "$soakdir" \( -name '*.incomplete' -o -name '.tmp*' -o -name 'ferrocrypt-*.tmp' \) 2>/dev/null | wc -l | tr -d ' ')
 if $soak_ok && [ "$litter" -eq 0 ]; then
     echo "PASS"
     PASSED=$((PASSED + 1))

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::Passphrase;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_x25519_recipient_string,
-    probe_recipient_mode, validate_private_key_file,
+    CryptoError, ENCRYPTED_EXTENSION, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PublicKey,
+    decode_x25519_recipient_string, probe_recipient_mode, validate_private_key_file,
 };
 
 use common::{generate_key_pair, passphrase_auto, recipient_auto};
@@ -2811,7 +2811,11 @@ fn test_encrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> 
 
     assert!(output.exists());
     assert_eq!(output, encrypt_dir.join("secret.fcr"));
-    assert!(!encrypt_dir.join("secret.fcr.incomplete").exists());
+    // Nothing else, such as the staged file, is left in the folder.
+    let entries: Vec<_> = fs::read_dir(&encrypt_dir)?
+        .map(|entry| entry.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(entries, ["secret.fcr"], "got: {entries:?}");
 
     Ok(())
 }
@@ -2832,13 +2836,13 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     );
 
     // No partial state: the pre-existing keys are byte-for-byte intact and
-    // no `.ferrocrypt-*` staging tempfile is left behind.
+    // nothing else, such as a staged key file, is left behind.
     assert_eq!(fs::read(test_dir.join("private.key"))?, private_before);
     assert_eq!(fs::read(test_dir.join("public.key"))?, public_before);
     let leftover: Vec<String> = fs::read_dir(&test_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(".ferrocrypt-"))
+        .filter(|n| n != PRIVATE_KEY_FILENAME && n != PUBLIC_KEY_FILENAME)
         .collect();
     assert!(
         leftover.is_empty(),

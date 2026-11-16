@@ -95,17 +95,16 @@ fn concurrent_encrypts_to_same_output_stay_no_clobber() {
         "exactly one writer must win the no-clobber race (got {winners} winners, {losers} losers)"
     );
 
-    // Exactly one committed `.fcr` exists — no loser left a second file behind.
+    // The folder holds exactly the committed `.fcr`: no loser left a second
+    // output or a staged file behind.
     let committed: Vec<PathBuf> = fs::read_dir(&out_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "fcr"))
         .collect();
-    assert_eq!(
-        committed.len(),
-        1,
-        "exactly one committed .fcr expected, found {committed:?}"
+    assert!(
+        committed.len() == 1 && committed[0].extension().is_some_and(|ext| ext == "fcr"),
+        "exactly one committed .fcr and nothing else expected, found {committed:?}"
     );
 
     // The committed file is a complete, valid encryption of the original, not

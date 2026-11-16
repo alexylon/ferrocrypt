@@ -78,9 +78,9 @@ On Linux distributions with snap support, such as Ubuntu, install it from the
 sudo snap install ferrocrypt
 ```
 
-The snap can open files in your home folder. It cannot save encrypted files or
-key pairs directly in the home folder itself, only in a folder inside it, such
-as Documents. To use files on USB drives and other removable media, also run:
+The snap can open files in your home folder. It cannot create hidden files or
+folders, whose names start with a dot, directly in the home folder itself. To
+use files on USB drives and other removable media, also run:
 
 ```bash
 sudo snap connect ferrocrypt:removable-media
@@ -355,10 +355,12 @@ with Ctrl-C, by closing the app, or by a power loss, the temporary output may
 remain on disk and contain plaintext. A previous `.incomplete` entry is never
 reused or automatically deleted; check it and move or remove it before retrying.
 
-Encryption and key generation write to hidden temporary files named
-`.ferrocrypt-…` and give a file its final name only once it is complete. An
-interrupted run can leave such a file behind; it holds no plaintext and can be
-deleted.
+Encryption and key generation write to temporary files named
+`ferrocrypt-….tmp` in the destination folder and give a file its final name
+only once it is complete. An interrupted run can leave such a file behind; it
+holds no plaintext and can be deleted. Releases up to 0.4.0 named these files
+`.ferrocrypt-….incomplete` and `.ferrocrypt-…_key-….tmp` (hidden); despite the
+first suffix, they hold no plaintext either and can be deleted.
 
 `decrypt --keep-partial` keeps incomplete output for recovery or inspection.
 Recovered parts may pass integrity checks even when an attacker has deliberately

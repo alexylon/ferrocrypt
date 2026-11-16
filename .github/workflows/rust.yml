@@ -334,7 +334,7 @@ jobs:
         # admits one, for a release that changes the API on purpose.
         run: |
           cargo semver-checks --package ferrocrypt \
-            --baseline-rev "$SEMVER_BASELINE_REV" --release-type major
+            --baseline-rev "$SEMVER_BASELINE_REV" --release-type patch
 
       - name: Resolve the latest stable release as the baseline
         # The versions endpoint lists newest first, so the first entry
@@ -354,12 +354,7 @@ jobs:
           echo "SEMVER_BASELINE=$baseline" >> "$GITHUB_ENV"
 
       - name: Check the public API against the baseline
-        # Without `--release-type`, the release type follows the version
-        # change from crates.io to the source; `major` admits an
-        # incompatible change while the two versions are still equal.
-        run: |
-          cargo semver-checks --package ferrocrypt \
-            --baseline-version "$SEMVER_BASELINE" --release-type major
+        run: cargo semver-checks --package ferrocrypt --baseline-version "$SEMVER_BASELINE"
 
   desktop:
     strategy:

@@ -116,9 +116,10 @@ The tag starts `.github/workflows/release.yml`, which:
    silicon), and Windows, and the static Linux CLI for x86-64 and arm64, which
    it also checks for shared libraries and runs on Alpine. Builds the desktop
    app's snap for x86-64 and arm64 from `snap/snapcraft.yaml`.
-3. Checks that the tag still names its commit, that the commit is on `main`,
-   and that it packages the crates exactly as step 1 built them. Then it
-   publishes `ferrocrypt` to crates.io, then `ferrocrypt-cli`.
+3. Once every build except the snaps has passed, checks that the tag still
+   names its commit, that the commit is on `main`, and that it packages the
+   crates exactly as step 1 built them. Then it publishes `ferrocrypt` to
+   crates.io, then `ferrocrypt-cli`.
 4. Checks the tag and `main` again, then creates a GitHub release with the
    archives, marked as a pre-release when the version has a suffix such as
    `-rc.5`.
@@ -126,8 +127,9 @@ The tag starts `.github/workflows/release.yml`, which:
    both snaps to the Snap Store, released to `stable`, or to `beta` for a
    version with a suffix.
 
-Nothing reaches crates.io or the Snap Store unless every check and build has
-passed.
+Nothing is published unless every check has passed. crates.io and the GitHub
+release also wait for every build except the snaps, which they do not
+include; a failed snap build holds back only the Snap Store upload.
 
 A new crate to publish goes into `PUBLISHED_CRATES` in
 `.github/workflows/release.yml`. Until it is there, or until its `Cargo.toml`
@@ -261,9 +263,11 @@ In the release workflow, after the push:
 
 - A job failed because of a temporary problem, such as a download that timed
   out: open the run on the Actions page and choose to re-run the failed jobs.
-- A check, the version check, the packaging, or a build failed for a real
-  reason: nothing was published. Fix it in a new commit, push it, and move the
-  tag to it. Pushing the moved tag starts the workflow again:
+  GitHub allows this for 30 days after the run started.
+- A check, the version check, the packaging, or a build other than a snap
+  failed for a real reason: nothing was published. Fix it in a new commit,
+  push it, and move the tag to it. Pushing the moved tag starts the workflow
+  again:
 
   ```bash
   git push origin HEAD
@@ -295,7 +299,11 @@ In the release workflow, after the push:
   yank `ferrocrypt` as below, fix the cause, and release the next version.
 - The crates are on crates.io but the GitHub release failed: re-run the failed
   jobs.
-- The snap build failed: nothing was published, as for any other build.
+- The snap build failed: crates.io and the GitHub release went ahead, and only
+  the Snap Store upload was skipped. If the Snap Store could not be reached,
+  although the workflow tries each install several times, re-run the failed
+  jobs later. If the build itself is broken, fix it and release the next
+  version: a run builds only its tagged commit.
 - The snap upload failed: if the Snap Store refused the login, make a new one
   as in step 5 under "Once, before the first release from the workflow", then
   re-run the failed jobs. The workflow uploads both snaps before it releases

@@ -7,6 +7,7 @@
 [![API documentation](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.4.1)
 ![Library minimum Rust version](https://img.shields.io/badge/Rust-1.87%2B-blue)
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.4.1)
+![Made in the EU](https://img.shields.io/badge/made_in-the_EU-003399)
 
 FerroCrypt encrypts files and folders into a single `.fcr` file. It is available
 as a desktop app, a command-line tool, and a Rust library for Linux, macOS, and

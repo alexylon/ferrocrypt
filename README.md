@@ -1,6 +1,4 @@
-<div align="center"><img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/ferrocrypt-desktop/assets/app_icon.png" width="85" alt="FerroCrypt"></div>
-
-<h1 align="center">FerroCrypt</h1>
+<p align="center"><img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/readme_banner.png" alt="FerroCrypt: encrypt files and folders with a password or a key pair"></p>
 
 <p align="center"><a href="https://ferrocrypt.app">ferrocrypt.app</a></p>
 

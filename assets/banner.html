@@ -1,0 +1,210 @@
+<!doctype html>
+<!--
+  FerroCrypt's banner. At 1500 by 500 it is the Snap Store's featured banner
+  (assets/snap_banner.png, drawn at twice that size) and the banner at the top of the README
+  (assets/readme_banner.png). With #og at the end of its address it is the 1200 by 630 image
+  shown when ferrocrypt.app is shared (public/images/og.png in ferrocrypt-app).
+
+  The same page is assets/banner.html in ferrocrypt and scripts/banner.html in ferrocrypt-app:
+  change both together. scripts/make_banners.py and ferrocrypt-app's scripts/og-image.mjs render
+  it, with the icon beside it as icon.png and the desktop app's Inter: its TTF files in
+  ferrocrypt, the same fonts as WOFF2 in ferrocrypt-app. JetBrains Mono comes from Google Fonts.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block" rel="stylesheet">
+<style>
+  @font-face { font-family: "Inter"; src: url("Inter-Regular.woff2") format("woff2"), url("Inter-Regular.ttf") format("truetype"); font-weight: 400; }
+  @font-face { font-family: "Inter"; src: url("Inter-SemiBold.woff2") format("woff2"), url("Inter-SemiBold.ttf") format("truetype"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("Inter-Bold.woff2") format("woff2"), url("Inter-Bold.ttf") format("truetype"); font-weight: 700; }
+  :root {
+    --bg: #0b0f1c;
+    --surface: #0f172a;
+    --border: #1e293b;
+    --border-hi: #334155;
+    --cyan: #06b6d4;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --faint: #64748b;
+    --green: #34d399;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1500px; height: 500px; overflow: hidden; }
+  body {
+    font-family: "Inter", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(ellipse 480px 360px at 240px 250px, rgba(6, 182, 212, 0.14), transparent 70%),
+      radial-gradient(ellipse 700px 420px at 1110px 250px, rgba(6, 182, 212, 0.07), transparent 70%),
+      linear-gradient(180deg, #0d1322 0%, #090c16 100%);
+    position: relative;
+  }
+  body::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(148, 163, 184, 0.16) 1px, transparent 1.2px);
+    background-size: 22px 22px;
+    -webkit-mask-image: radial-gradient(ellipse 620px 300px at 1110px 250px, #000 10%, transparent 80%);
+  }
+
+  .brand {
+    position: absolute; left: 88px; top: 0; bottom: 0;
+    display: flex; align-items: center; gap: 40px;
+  }
+  .brand img {
+    width: 176px; height: 176px;
+    filter: drop-shadow(0 18px 30px rgba(0,0,0,0.6)) drop-shadow(0 0 36px rgba(6,182,212,0.22));
+  }
+  .name {
+    font-size: 74px; font-weight: 700; letter-spacing: -2px; line-height: 1;
+  }
+  .name span { color: var(--cyan); text-shadow: 0 0 30px rgba(6, 182, 212, 0.35); }
+  .tagline {
+    margin-top: 18px;
+    font-size: 25px; line-height: 1.35; font-weight: 400; color: #cbd5e1;
+  }
+  .tags {
+    margin-top: 22px;
+    font-family: "JetBrains Mono", Menlo, monospace;
+    font-size: 15px; color: var(--muted);
+  }
+  .tags b { color: var(--cyan); margin: 0 8px; font-weight: 500; }
+
+  .flow {
+    position: absolute; right: 88px; top: 50%; transform: translateY(-50%);
+    display: flex; align-items: center;
+  }
+  .card {
+    width: 200px; height: 250px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, #111a2e 0%, #0d1424 100%);
+    border: 1.5px solid var(--border-hi);
+    box-shadow: 0 28px 60px rgba(0,0,0,0.55);
+    padding: 22px 20px 18px;
+    display: flex; flex-direction: column;
+  }
+  .card.enc {
+    border-color: rgba(6, 182, 212, 0.75);
+    box-shadow: 0 28px 60px rgba(0,0,0,0.55), 0 0 40px rgba(6, 182, 212, 0.18);
+  }
+  .doc { flex: 1; display: flex; flex-direction: column; gap: 11px; padding-top: 6px; }
+  .bar { height: 8px; border-radius: 4px; background: #334155; }
+  .bar.h { height: 12px; background: #475569; width: 70%; margin-bottom: 6px; }
+  .hex {
+    flex: 1;
+    font-family: "JetBrains Mono", Menlo, monospace;
+    font-size: 12.5px; line-height: 21px; letter-spacing: 0.4px;
+    color: rgba(6, 182, 212, 0.78);
+    white-space: pre;
+  }
+  .meta { border-top: 1px solid var(--border); padding-top: 14px; }
+  .fname { font-size: 18px; font-weight: 600; }
+  .fname .ext { color: var(--cyan); }
+  .sub { margin-top: 4px; font-size: 13.5px; color: var(--faint); display: flex; align-items: center; gap: 6px; }
+  .sub.ok { color: var(--green); }
+
+  .link {
+    position: relative; width: 190px; height: 250px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .link::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px;
+    background: linear-gradient(90deg, rgba(100,116,139,0.6), rgba(6,182,212,0.9));
+  }
+  .link::after {
+    content: ""; position: absolute; right: 2px; top: 50%;
+    width: 10px; height: 10px; margin-top: -5px;
+    border-top: 2px solid var(--cyan); border-right: 2px solid var(--cyan);
+    transform: rotate(45deg);
+  }
+  .badge {
+    position: relative; z-index: 1;
+    width: 84px; height: 84px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 40%, #1c2a44 0%, #0b0f1c 75%);
+    border: 2px solid var(--cyan);
+    box-shadow: 0 0 34px rgba(6, 182, 212, 0.4), 0 0 0 8px rgba(6, 182, 212, 0.07);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .badge svg { filter: drop-shadow(0 0 8px rgba(6, 182, 212, 0.8)); }
+  .label {
+    position: absolute; top: calc(50% + 62px); left: 0; right: 0; text-align: center;
+    font-size: 13.5px; color: var(--muted); line-height: 1.4;
+  }
+
+  .og, .og body { width: 1200px; height: 630px; }
+  .og body {
+    background:
+      radial-gradient(ellipse 440px 420px at 200px 315px, rgba(6, 182, 212, 0.14), transparent 70%),
+      radial-gradient(ellipse 600px 480px at 870px 315px, rgba(6, 182, 212, 0.07), transparent 70%),
+      linear-gradient(180deg, #0d1322 0%, #090c16 100%);
+  }
+  .og body::before {
+    -webkit-mask-image: radial-gradient(ellipse 520px 380px at 870px 315px, #000 10%, transparent 80%);
+  }
+  .og .brand { left: 72px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 30px; }
+  .og .brand img { width: 132px; height: 132px; }
+  .og .name { font-size: 70px; }
+  .og .flow { right: 64px; }
+  .og .card { width: 210px; height: 300px; }
+  .og .link { width: 170px; height: 300px; }
+  .og .doc { gap: 14px; }
+  .og .hex { line-height: 25px; }
+</style>
+</head>
+<body>
+  <script>if (location.hash === "#og") document.documentElement.classList.add("og");</script>
+  <div class="brand">
+    <img src="icon.png" alt="">
+    <div>
+      <div class="name">Ferro<span>Crypt</span></div>
+      <div class="tagline">Encrypt files and folders<br>with a password or a key pair</div>
+      <div class="tags">XChaCha20-Poly1305<b>·</b>Argon2id<b>·</b>X25519</div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="card">
+      <div class="doc">
+        <div class="bar h"></div>
+        <div class="bar" style="width: 100%"></div>
+        <div class="bar" style="width: 88%"></div>
+        <div class="bar" style="width: 95%"></div>
+        <div class="bar" style="width: 62%"></div>
+        <div class="bar" style="width: 90%"></div>
+        <div class="bar" style="width: 74%"></div>
+      </div>
+      <div class="meta">
+        <div class="fname">report<span style="color: var(--muted)">.pdf</span></div>
+        <div class="sub">Original kept</div>
+      </div>
+    </div>
+
+    <div class="link">
+      <div class="badge">
+        <svg width="30" height="42" viewBox="0 0 30 42">
+          <circle cx="15" cy="11" r="10" fill="#06b6d4"/>
+          <path d="M10.5 16 L19.5 16 L22 41 L8 41 Z" fill="#06b6d4"/>
+        </svg>
+      </div>
+      <div class="label">Password<br>or key pair</div>
+    </div>
+
+    <div class="card enc">
+      <div class="hex">7f 3a c1 9e 04 b8 d2
+e6 51 0a 9c 3f 77 a4
+2b f0 68 d5 13 8e c9
+91 4c e7 0b 26 fa 5d
+c3 88 1e 6a b5 02 f4
+5e 97 d0 3b 81 cc 49</div>
+      <div class="meta">
+        <div class="fname">report<span class="ext">.fcr</span></div>
+        <div class="sub ok">
+          <svg width="12" height="13" viewBox="0 0 12 13"><rect x="1" y="5.5" width="10" height="7" rx="1.5" fill="#34d399"/><path d="M3.5 5.5 V3.8 a2.5 2.5 0 0 1 5 0 V5.5" stroke="#34d399" stroke-width="1.6" fill="none"/></svg>
+          Encrypted
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
